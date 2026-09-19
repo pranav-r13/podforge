@@ -173,3 +173,32 @@ pub fn apply_ipod_compat_fix(conn: &mut Connection, album_id: i64) -> Result<Fix
 
     Ok(report)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn m4a_and_mp4_accept_both_alac_and_aac() {
+        assert_eq!(expected_codecs("m4a"), &["alac", "aac"]);
+        assert_eq!(expected_codecs("mp4"), &["alac", "aac"]);
+    }
+
+    #[test]
+    fn mp3_only_accepts_mp3_codec() {
+        assert_eq!(expected_codecs("mp3"), &["mp3"]);
+        assert!(!expected_codecs("mp3").contains(&"flac"));
+    }
+
+    #[test]
+    fn unknown_extension_has_no_expected_codecs() {
+        assert!(expected_codecs("xyz").is_empty());
+    }
+
+    #[test]
+    fn extension_matching_is_case_sensitive_lowercase_only() {
+        // callers are responsible for lowercasing before calling this --
+        // documents that assumption so a regression here is caught.
+        assert!(expected_codecs("MP3").is_empty());
+    }
+}

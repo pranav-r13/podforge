@@ -86,10 +86,15 @@ pub fn search_release(user_agent: &str, artist: &str, album: &str) -> Result<Vec
         return Err(format!("MusicBrainz returned status {status}"));
     }
 
-    let parsed: SearchResponse = response
-        .json()
-        .map_err(|e| format!("could not parse MusicBrainz response: {e}"))?;
+    let body = response
+        .text()
+        .map_err(|e| format!("could not read MusicBrainz response: {e}"))?;
+    parse_search_response(&body)
+}
 
+fn parse_search_response(body: &str) -> Result<Vec<MbCandidate>, String> {
+    let parsed: SearchResponse =
+        serde_json::from_str(body).map_err(|e| format!("could not parse MusicBrainz response: {e}"))?;
     Ok(parsed.releases.into_iter().map(release_json_to_candidate).collect())
 }
 
@@ -137,10 +142,15 @@ pub fn lookup_by_discid(user_agent: &str, disc_id: &str) -> Result<Vec<MbCandida
         return Err(format!("MusicBrainz returned status {}", response.status()));
     }
 
-    let parsed: DiscIdLookupResponse = response
-        .json()
-        .map_err(|e| format!("could not parse MusicBrainz response: {e}"))?;
+    let body = response
+        .text()
+        .map_err(|e| format!("could not read MusicBrainz response: {e}"))?;
+    parse_discid_lookup_response(&body)
+}
 
+fn parse_discid_lookup_response(body: &str) -> Result<Vec<MbCandidate>, String> {
+    let parsed: DiscIdLookupResponse =
+        serde_json::from_str(body).map_err(|e| format!("could not parse MusicBrainz response: {e}"))?;
     Ok(parsed.releases.into_iter().map(release_json_to_candidate).collect())
 }
 
@@ -200,9 +210,15 @@ pub fn fetch_release_detail(user_agent: &str, release_id: &str) -> Result<Releas
         return Err(format!("MusicBrainz returned status {}", response.status()));
     }
 
-    let parsed: ReleaseDetailJson = response
-        .json()
-        .map_err(|e| format!("could not parse MusicBrainz response: {e}"))?;
+    let body = response
+        .text()
+        .map_err(|e| format!("could not read MusicBrainz response: {e}"))?;
+    parse_release_detail_response(&body)
+}
+
+fn parse_release_detail_response(body: &str) -> Result<ReleaseDetail, String> {
+    let parsed: ReleaseDetailJson =
+        serde_json::from_str(body).map_err(|e| format!("could not parse MusicBrainz response: {e}"))?;
 
     let tracks = parsed
         .media
@@ -227,4 +243,104 @@ pub fn fetch_release_detail(user_agent: &str, release_id: &str) -> Result<Releas
         artist: join_artist_credit(parsed.artist_credit),
         tracks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_search_response_with_multiple_candidates() {
+        let body = r#"{
+            "releases": [
+                {
+                    "id": "aaaa-1111",
+                    "title": "Back In Black",
+                    "date": "1980-07-25",
+                    "country": "GB",
+                    "disambiguation": "remaster",
+                    "artist-credit": [{"name": "AC/DC", "joinphrase": ""}]
+                },
+                {
+                    "id": "bbbb-2222",
+                    "title": "Back In Black",
+                    "date": "1980",
+                    "country": null,
+                    "artist-credit": [
+                        {"name": "AC", "joinphrase": " & "},
+                        {"name": "DC", "joinphrase": ""}
+                    ]
+                }
+            ]
+        }"#;
+
+        let candidates = parse_search_response(body).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].release_id, "aaaa-1111");
+        assert_eq!(candidates[0].artist, "AC/DC");
+        assert_eq!(candidates[0].disambiguation.as_deref(), Some("remaster"));
+        assert_eq!(candidates[1].artist, "AC, DC");
+        assert_eq!(candidates[1].country, None);
+    }
+
+    #[test]
+    fn parses_search_response_with_no_releases() {
+        let candidates = parse_search_response(r#"{"releases": []}"#).unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn search_response_missing_releases_key_defaults_to_empty() {
+        let candidates = parse_search_response(r#"{}"#).unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn malformed_search_response_is_an_error() {
+        assert!(parse_search_response("not json").is_err());
+    }
+
+    #[test]
+    fn parses_discid_lookup_response() {
+        let body = r#"{
+            "releases": [
+                {"id": "cccc-3333", "title": "Exact TOC Match", "artist-credit": [{"name": "Some Band"}]}
+            ]
+        }"#;
+        let candidates = parse_discid_lookup_response(body).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].title, "Exact TOC Match");
+    }
+
+    #[test]
+    fn parses_release_detail_with_tracks_and_per_track_artist() {
+        let body = r#"{
+            "title": "Back In Black",
+            "artist-credit": [{"name": "AC/DC"}],
+            "media": [
+                {
+                    "tracks": [
+                        {"position": 1, "title": "Hells Bells", "artist-credit": [{"name": "AC/DC"}]},
+                        {"position": 2, "title": "Shoot to Thrill", "artist-credit": []}
+                    ]
+                }
+            ]
+        }"#;
+
+        let detail = parse_release_detail_response(body).unwrap();
+        assert_eq!(detail.title, "Back In Black");
+        assert_eq!(detail.artist, "AC/DC");
+        assert_eq!(detail.tracks.len(), 2);
+        assert_eq!(detail.tracks[0].number, 1);
+        assert_eq!(detail.tracks[0].artist.as_deref(), Some("AC/DC"));
+        assert_eq!(detail.tracks[1].artist, None);
+    }
+
+    #[test]
+    fn release_detail_with_no_media_has_empty_tracks() {
+        let body = r#"{"title": "No Tracklist", "artist-credit": [], "media": []}"#;
+        let detail = parse_release_detail_response(body).unwrap();
+        assert!(detail.tracks.is_empty());
+        assert_eq!(detail.artist, "");
+    }
 }

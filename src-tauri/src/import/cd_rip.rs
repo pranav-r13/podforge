@@ -9,7 +9,7 @@ use tokio::process::{Child, Command};
 /// be reported as a fraction of the track's total sector count.
 fn parse_sector(line: &str) -> Option<i64> {
     let at_pos = line.rfind('@')?;
-    line[at_pos + 1..].trim().split_whitespace().next()?.parse().ok()
+    line[at_pos + 1..].split_whitespace().next()?.parse().ok()
 }
 
 /// Rips one track from `device` to `output_path` as a WAV file via
@@ -68,4 +68,29 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_sector_off_a_typical_progress_line() {
+        assert_eq!(parse_sector("##: 2 [wrote] @ 5238"), Some(5238));
+    }
+
+    #[test]
+    fn parses_sector_with_trailing_whitespace() {
+        assert_eq!(parse_sector("##: 2 [wrote] @ 5238   "), Some(5238));
+    }
+
+    #[test]
+    fn line_without_at_sign_has_no_sector() {
+        assert_eq!(parse_sector("cd-paranoia III release 10.2"), None);
+    }
+
+    #[test]
+    fn non_numeric_text_after_at_sign_has_no_sector() {
+        assert_eq!(parse_sector("outputting to @ file.wav"), None);
+    }
 }

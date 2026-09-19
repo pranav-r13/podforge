@@ -23,7 +23,12 @@ pub fn detect_cd() -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
+    parse_diskutil_list(&text)
+}
 
+/// Pure parser behind `detect_cd`, split out so it can run against saved
+/// `diskutil list` output without a real disk attached.
+fn parse_diskutil_list(text: &str) -> Option<String> {
     let mut current_disk: Option<String> = None;
     for line in text.lines() {
         let trimmed = line.trim();
@@ -38,4 +43,40 @@ pub fn detect_cd() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_cd_da_disk_and_returns_its_whole_disk_path() {
+        let output = "\
+/dev/disk0 (internal, physical):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:      GUID_partition_scheme                        *500.3 GB   disk0
+
+/dev/disk3 (external, physical):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:     CD_partition_scheme                            *702.8 MB  disk3
+   1:                       CD_DA                         702.8 MB  disk3s0
+";
+        assert_eq!(parse_diskutil_list(output).as_deref(), Some("/dev/disk3"));
+    }
+
+    #[test]
+    fn no_cd_da_entry_returns_none() {
+        let output = "\
+/dev/disk0 (internal, physical):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:      GUID_partition_scheme                        *500.3 GB   disk0
+   1:                  Apple_APFS Container disk1        500.0 GB   disk0s2
+";
+        assert_eq!(parse_diskutil_list(output), None);
+    }
+
+    #[test]
+    fn empty_output_returns_none() {
+        assert_eq!(parse_diskutil_list(""), None);
+    }
 }

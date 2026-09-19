@@ -145,3 +145,117 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::models::{Album, Track};
+
+    fn album() -> Album {
+        Album {
+            id: 1,
+            title: "Rock/Pop Mix".into(),
+            album_artist: Some("AC/DC".into()),
+            year: Some(1980),
+            genre: None,
+            musicbrainz_release_id: None,
+            cover_art_path: None,
+            source_type: "folder".into(),
+            source_path: None,
+            created_at: String::new(),
+            tracks: vec![],
+        }
+    }
+
+    fn track() -> Track {
+        Track {
+            id: 1,
+            album_id: 1,
+            disc_number: Some(1),
+            track_number: Some(3),
+            title: "Back In Black".into(),
+            artist: None,
+            duration_ms: Some(255_000),
+            source_path: "in.flac".into(),
+            output_path: None,
+            status: "pending".into(),
+            musicbrainz_recording_id: None,
+            codec: None,
+            container: None,
+        }
+    }
+
+    fn options(format: &str, quality: &str) -> ConvertOptions {
+        ConvertOptions {
+            format: format.into(),
+            quality: quality.into(),
+            output_dir: "/out".into(),
+        }
+    }
+
+    #[test]
+    fn alac_and_aac_use_m4a_container() {
+        assert_eq!(extension_for_format("alac").unwrap(), "m4a");
+        assert_eq!(extension_for_format("aac").unwrap(), "m4a");
+        assert_eq!(extension_for_format("mp3").unwrap(), "mp3");
+        assert_eq!(extension_for_format("flac").unwrap(), "flac");
+        assert!(extension_for_format("wav").is_err());
+    }
+
+    #[test]
+    fn output_path_sanitizes_slashes_in_artist_and_album() {
+        let path = build_output_path(&album(), &track(), &options("mp3", "2")).unwrap();
+        assert_eq!(
+            path,
+            std::path::Path::new("/out/AC-DC/Rock-Pop Mix/03 Back In Black.mp3")
+        );
+    }
+
+    #[test]
+    fn output_path_falls_back_to_album_artist_when_track_artist_missing() {
+        let path = build_output_path(&album(), &track(), &options("alac", "")).unwrap();
+        assert!(path.starts_with("/out/AC-DC"));
+        assert_eq!(path.extension().unwrap(), "m4a");
+    }
+
+    #[test]
+    fn output_path_zero_pads_missing_track_number() {
+        let mut t = track();
+        t.track_number = None;
+        let path = build_output_path(&album(), &t, &options("flac", "5")).unwrap();
+        assert!(path.file_name().unwrap().to_str().unwrap().starts_with("00 "));
+    }
+
+    fn as_str_slice(args: &[String]) -> Vec<&str> {
+        args.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn mp3_codec_args_use_libmp3lame_quality() {
+        let args = codec_args(&options("mp3", "2")).unwrap();
+        assert_eq!(as_str_slice(&args), vec!["-c:a", "libmp3lame", "-q:a", "2"]);
+    }
+
+    #[test]
+    fn flac_codec_args_use_compression_level() {
+        let args = codec_args(&options("flac", "5")).unwrap();
+        assert_eq!(as_str_slice(&args), vec!["-c:a", "flac", "-compression_level", "5"]);
+    }
+
+    #[test]
+    fn alac_codec_args_force_ipod_muxer() {
+        let args = codec_args(&options("alac", "")).unwrap();
+        assert_eq!(as_str_slice(&args), vec!["-c:a", "alac", "-f", "ipod"]);
+    }
+
+    #[test]
+    fn aac_codec_args_include_bitrate_and_ipod_muxer() {
+        let args = codec_args(&options("aac", "256k")).unwrap();
+        assert_eq!(as_str_slice(&args), vec!["-c:a", "aac", "-b:a", "256k", "-f", "ipod"]);
+    }
+
+    #[test]
+    fn unsupported_format_is_rejected() {
+        assert!(codec_args(&options("ogg", "")).is_err());
+    }
+}
