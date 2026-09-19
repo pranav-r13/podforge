@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 
-use super::models::{Album, ScannedAlbum, Track};
+use super::models::{Album, Job, ScannedAlbum, Track};
 use crate::metadata::tags::TagPatch;
 
 /// Inserts a scanned album and its tracks in a single transaction.
@@ -136,6 +136,73 @@ pub fn update_track_codec(conn: &Connection, track_id: i64, codec: &str, contain
         params![codec, container, track_id],
     )?;
     Ok(())
+}
+
+pub fn set_track_output_path(conn: &Connection, track_id: i64, output_path: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tracks SET output_path = ?1, status = 'converted' WHERE id = ?2",
+        params![output_path, track_id],
+    )?;
+    Ok(())
+}
+
+fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<Job> {
+    Ok(Job {
+        id: row.get("id")?,
+        job_type: row.get("type")?,
+        track_id: row.get("track_id")?,
+        album_id: row.get("album_id")?,
+        status: row.get("status")?,
+        progress: row.get("progress")?,
+        error: row.get("error")?,
+        created_at: row.get("created_at")?,
+        completed_at: row.get("completed_at")?,
+    })
+}
+
+/// Inserts a queued job row. Progress tracking (status/progress/error)
+/// happens separately via `update_job_progress` as the background worker runs.
+pub fn insert_job(conn: &Connection, job_type: &str, track_id: Option<i64>, album_id: Option<i64>) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO jobs (type, track_id, album_id, status, progress) VALUES (?1, ?2, ?3, 'queued', 0)",
+        params![job_type, track_id, album_id],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Updates a job's live status/progress/error. Stamps `completed_at` once
+/// the job reaches a terminal state (done/error/cancelled).
+pub fn update_job_progress(conn: &Connection, job_id: i64, status: &str, progress: f64, error: Option<&str>) -> rusqlite::Result<()> {
+    let terminal = matches!(status, "done" | "error" | "cancelled");
+    conn.execute(
+        "UPDATE jobs SET
+            status = ?1,
+            progress = ?2,
+            error = ?3,
+            completed_at = CASE WHEN ?4 THEN datetime('now') ELSE completed_at END
+         WHERE id = ?5",
+        params![status, progress, error, terminal, job_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_job(conn: &Connection, job_id: i64) -> rusqlite::Result<Job> {
+    conn.query_row("SELECT * FROM jobs WHERE id = ?1", params![job_id], row_to_job)
+}
+
+pub fn list_jobs(conn: &Connection, status: Option<&str>) -> rusqlite::Result<Vec<Job>> {
+    match status {
+        Some(status) => {
+            let mut stmt = conn.prepare("SELECT * FROM jobs WHERE status = ?1 ORDER BY created_at DESC")?;
+            let rows = stmt.query_map(params![status], row_to_job)?;
+            rows.collect()
+        }
+        None => {
+            let mut stmt = conn.prepare("SELECT * FROM jobs ORDER BY created_at DESC")?;
+            let rows = stmt.query_map([], row_to_job)?;
+            rows.collect()
+        }
+    }
 }
 
 fn row_to_album(conn: &Connection, row: &rusqlite::Row) -> rusqlite::Result<Album> {

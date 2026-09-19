@@ -55,3 +55,25 @@ export interface MbCandidate {
   country: string | null;
   disambiguation: string | null;
 }
+
+export type ConvertFormat = "mp3" | "alac" | "flac" | "aac";
+
+export interface Job {
+  id: number;
+  type: string;
+  track_id: number | null;
+  album_id: number | null;
+  status: string;
+  progress: number;
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface JobProgressEvent {
+  job_id: number;
+  track_id: number | null;
+  status: string;
+  progress: number;
+  error: string | null;
+}

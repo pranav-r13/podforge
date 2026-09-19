@@ -1,8 +1,18 @@
 <script lang="ts">
   import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
+  import { audioDir, join } from "@tauri-apps/api/path";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { onMount } from "svelte";
-  import type { Album, FixReport, MbCandidate, TagPatch } from "$lib/types";
+  import { onDestroy, onMount } from "svelte";
+  import type {
+    Album,
+    ConvertFormat,
+    FixReport,
+    Job,
+    JobProgressEvent,
+    MbCandidate,
+    TagPatch,
+  } from "$lib/types";
 
   let albums = $state<Album[]>([]);
   let selectedAlbumId = $state<number | null>(null);
@@ -30,9 +40,56 @@
   let mbApplyingId = $state<string | null>(null);
   let coverUploading = $state(false);
 
+  const qualityPresets: Record<ConvertFormat, { label: string; value: string }[]> = {
+    mp3: [
+      { label: "High (V0)", value: "0" },
+      { label: "Medium (V4)", value: "4" },
+      { label: "Low (V7)", value: "7" },
+    ],
+    aac: [
+      { label: "320 kbps", value: "320k" },
+      { label: "256 kbps", value: "256k" },
+      { label: "128 kbps", value: "128k" },
+    ],
+    flac: [
+      { label: "Max compression", value: "8" },
+      { label: "Balanced", value: "5" },
+      { label: "Fast", value: "0" },
+    ],
+    alac: [{ label: "Lossless", value: "" }],
+  };
+
+  let showConvertDialog = $state(false);
+  let convertFormat = $state<ConvertFormat>("mp3");
+  let convertQuality = $state(qualityPresets.mp3[0].value);
+  let convertOutputDir = $state("");
+  let converting = $state(false);
+
+  let jobs = $state<Job[]>([]);
+  let jobsPanelOpen = $state(true);
+  let unlistenJobProgress: (() => void) | null = null;
+
   let selectedAlbum = $derived(
     albums.find((a) => a.id === selectedAlbumId) ?? null,
   );
+
+  let activeJobs = $derived(
+    jobs.filter((j) => j.status === "queued" || j.status === "running"),
+  );
+
+  function trackTitle(trackId: number | null): string {
+    if (trackId === null) return "";
+    for (const album of albums) {
+      const track = album.tracks.find((t) => t.id === trackId);
+      if (track) return `${album.title} — ${track.title}`;
+    }
+    return `Track ${trackId}`;
+  }
+
+  function setConvertFormat(format: ConvertFormat) {
+    convertFormat = format;
+    convertQuality = qualityPresets[format][0].value;
+  }
 
   function coverSrc(path: string): string {
     // cache-bust: cover_art_path is stable but its file contents can change
@@ -250,7 +307,99 @@
     }
   }
 
-  onMount(loadLibrary);
+  function upsertJob(update: JobProgressEvent) {
+    const existing = jobs.find((j) => j.id === update.job_id);
+    if (existing) {
+      jobs = jobs.map((j) =>
+        j.id === update.job_id
+          ? { ...j, status: update.status, progress: update.progress, error: update.error }
+          : j,
+      );
+    } else {
+      jobs = [
+        {
+          id: update.job_id,
+          type: "convert",
+          track_id: update.track_id,
+          album_id: null,
+          status: update.status,
+          progress: update.progress,
+          error: update.error,
+          created_at: new Date().toISOString(),
+          completed_at: null,
+        },
+        ...jobs,
+      ];
+    }
+    if (update.status === "done") {
+      loadLibrary();
+    }
+  }
+
+  async function openConvertDialog() {
+    if (convertOutputDir === "") {
+      try {
+        convertOutputDir = await join(await audioDir(), "Converted");
+      } catch {
+        convertOutputDir = "";
+      }
+    }
+    showConvertDialog = true;
+  }
+
+  function closeConvertDialog() {
+    showConvertDialog = false;
+  }
+
+  async function chooseOutputDir() {
+    const path = await open({ directory: true, multiple: false });
+    if (path) convertOutputDir = path;
+  }
+
+  async function startConversion() {
+    if (selectedTrackIds.size === 0 || !convertOutputDir) return;
+    converting = true;
+    error = null;
+    try {
+      await invoke("enqueue_conversion", {
+        trackIds: Array.from(selectedTrackIds),
+        format: convertFormat,
+        quality: convertQuality,
+        outputDir: convertOutputDir,
+      });
+      jobsPanelOpen = true;
+      showConvertDialog = false;
+      selectedTrackIds = new Set();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      converting = false;
+    }
+  }
+
+  async function cancelJob(jobId: number) {
+    try {
+      await invoke("cancel_job", { jobId });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  onMount(async () => {
+    await loadLibrary();
+    try {
+      jobs = await invoke<Job[]>("list_jobs", { status: null });
+    } catch (e) {
+      error = String(e);
+    }
+    unlistenJobProgress = await listen<JobProgressEvent>("job-progress", (event) => {
+      upsertJob(event.payload);
+    });
+  });
+
+  onDestroy(() => {
+    unlistenJobProgress?.();
+  });
 </script>
 
 <div class="flex h-screen bg-white text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
@@ -517,6 +666,13 @@
           Cancel
         </button>
       </div>
+
+      <button
+        onclick={openConvertDialog}
+        class="mt-2 w-full rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900"
+      >
+        Convert {selectedTrackIds.size} selected…
+      </button>
     </aside>
   {/if}
 
@@ -571,6 +727,124 @@
           </ul>
         {/if}
       </div>
+    </div>
+  {/if}
+
+  {#if showConvertDialog}
+    <div
+      class="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      role="button"
+      tabindex="-1"
+      onclick={closeConvertDialog}
+      onkeydown={(e) => e.key === "Escape" && closeConvertDialog()}
+    >
+      <div
+        role="dialog"
+        tabindex="-1"
+        class="w-96 rounded-lg bg-white p-4 shadow-xl dark:bg-neutral-900"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.stopPropagation()}
+      >
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-sm font-medium">Convert {selectedTrackIds.size} tracks</h3>
+          <button onclick={closeConvertDialog} class="text-xs text-neutral-400">Close</button>
+        </div>
+
+        <label for="convert-format" class="block text-xs font-medium text-neutral-500 dark:text-neutral-400">Format</label>
+        <select
+          id="convert-format"
+          value={convertFormat}
+          onchange={(e) => setConvertFormat(e.currentTarget.value as ConvertFormat)}
+          class="mt-1 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+        >
+          <option value="mp3">MP3</option>
+          <option value="alac">ALAC (.m4a)</option>
+          <option value="flac">FLAC</option>
+          <option value="aac">AAC (.m4a)</option>
+        </select>
+
+        <label for="convert-quality" class="mt-3 block text-xs font-medium text-neutral-500 dark:text-neutral-400">Quality</label>
+        <select
+          id="convert-quality"
+          bind:value={convertQuality}
+          disabled={qualityPresets[convertFormat].length === 1}
+          class="mt-1 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm disabled:opacity-50 dark:border-neutral-700"
+        >
+          {#each qualityPresets[convertFormat] as preset}
+            <option value={preset.value}>{preset.label}</option>
+          {/each}
+        </select>
+
+        <label for="convert-output" class="mt-3 block text-xs font-medium text-neutral-500 dark:text-neutral-400">Output folder</label>
+        <div class="mt-1 flex gap-2">
+          <input
+            id="convert-output"
+            type="text"
+            bind:value={convertOutputDir}
+            class="w-full rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+          />
+          <button
+            onclick={chooseOutputDir}
+            class="shrink-0 rounded-md border border-neutral-300 px-2 py-1 text-xs font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900"
+          >
+            Choose…
+          </button>
+        </div>
+
+        <button
+          onclick={startConversion}
+          disabled={converting || !convertOutputDir}
+          class="mt-4 w-full rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+        >
+          {converting ? "Starting…" : `Convert ${selectedTrackIds.size} tracks`}
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  {#if jobs.length > 0}
+    <div class="fixed bottom-0 left-0 right-0 z-10 border-t border-neutral-200 bg-white shadow-[0_-1px_8px_rgba(0,0,0,0.06)] dark:border-neutral-800 dark:bg-neutral-950">
+      <button
+        onclick={() => (jobsPanelOpen = !jobsPanelOpen)}
+        class="flex w-full items-center justify-between px-4 py-2 text-xs font-medium text-neutral-500 dark:text-neutral-400"
+      >
+        <span>Jobs — {activeJobs.length} active, {jobs.length} total</span>
+        <span>{jobsPanelOpen ? "Hide ▾" : "Show ▴"}</span>
+      </button>
+
+      {#if jobsPanelOpen}
+        <div class="max-h-48 overflow-y-auto px-4 pb-3">
+          {#each jobs as job (job.id)}
+            <div class="flex items-center gap-3 border-t border-neutral-100 py-2 first:border-t-0 dark:border-neutral-900">
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-xs font-medium">{trackTitle(job.track_id)}</p>
+                <div class="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-800">
+                  <div
+                    class="h-full rounded-full {job.status === 'error'
+                      ? 'bg-red-500'
+                      : job.status === 'done'
+                        ? 'bg-green-500'
+                        : 'bg-neutral-900 dark:bg-white'}"
+                    style="width: {Math.round(job.progress * 100)}%"
+                  ></div>
+                </div>
+                {#if job.error}
+                  <p class="mt-1 truncate text-xs text-red-600 dark:text-red-400" title={job.error}>{job.error}</p>
+                {/if}
+              </div>
+              <span class="shrink-0 text-xs capitalize text-neutral-400">{job.status}</span>
+              {#if job.status === "queued" || job.status === "running"}
+                <button
+                  onclick={() => cancelJob(job.id)}
+                  class="shrink-0 text-xs font-medium text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100"
+                >
+                  Cancel
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
   {/if}
 </div>

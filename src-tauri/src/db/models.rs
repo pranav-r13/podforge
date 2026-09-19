@@ -32,6 +32,20 @@ pub struct Album {
     pub tracks: Vec<Track>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Job {
+    pub id: i64,
+    #[serde(rename = "type")]
+    pub job_type: String,
+    pub track_id: Option<i64>,
+    pub album_id: Option<i64>,
+    pub status: String,
+    pub progress: f64,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
 /// In-memory result of scanning a folder, before it's inserted into the DB.
 #[derive(Debug, Clone)]
 pub struct ScannedAlbum {

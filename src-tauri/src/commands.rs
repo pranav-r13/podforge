@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::db::models::{Album, Track};
+use crate::convert::ffmpeg::ConvertOptions;
+use crate::convert::job_queue::JobQueue;
+use crate::db::models::{Album, Job, Track};
 use crate::db::{queries, DbState};
 use crate::import::folder_scan;
 use crate::metadata::cover_art;
@@ -141,6 +143,63 @@ fn apply_cover_bytes(app: &AppHandle, state: &State<DbState>, album_id: i64, byt
 
     queries::set_album_cover_art_path(&conn, album_id, &file_path.to_string_lossy())
         .map_err(|e| e.to_string())
+}
+
+/// Enqueues one conversion job per track. Each job runs on the shared
+/// `JobQueue` worker pool once a permit is free; progress is persisted to
+/// `jobs` and pushed to the frontend via `job-progress` events rather than
+/// polled.
+#[tauri::command]
+pub fn enqueue_conversion(
+    app: AppHandle,
+    state: State<DbState>,
+    job_queue: State<JobQueue>,
+    track_ids: Vec<i64>,
+    format: String,
+    quality: String,
+    output_dir: String,
+) -> Result<Vec<i64>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut job_ids = Vec::new();
+
+    for track_id in track_ids {
+        let track = queries::get_track(&conn, track_id).map_err(|e| e.to_string())?;
+        let album = queries::get_album(&conn, track.album_id).map_err(|e| e.to_string())?;
+        let job_id = queries::insert_job(&conn, "convert", Some(track_id), Some(track.album_id))
+            .map_err(|e| e.to_string())?;
+        job_ids.push(job_id);
+
+        let options = ConvertOptions {
+            format: format.clone(),
+            quality: quality.clone(),
+            output_dir: output_dir.clone(),
+        };
+        job_queue.spawn_conversion(app.clone(), job_id, track, album, options);
+    }
+
+    Ok(job_ids)
+}
+
+#[tauri::command]
+pub fn get_job_status(state: State<DbState>, job_id: i64) -> Result<Job, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    queries::get_job(&conn, job_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_jobs(state: State<DbState>, status: Option<String>) -> Result<Vec<Job>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    queries::list_jobs(&conn, status.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Kills the job's ffmpeg process if it's already running, and marks it
+/// cancelled in the DB either way (a job still queued behind the semaphore
+/// has no process yet, so this is what stops it from ever starting).
+#[tauri::command]
+pub fn cancel_job(state: State<DbState>, job_queue: State<JobQueue>, job_id: i64) -> Result<(), String> {
+    job_queue.cancel(job_id);
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    queries::update_job_progress(&conn, job_id, "cancelled", 0.0, None).map_err(|e| e.to_string())
 }
 
 fn cover_dir(app: &AppHandle) -> Result<PathBuf, String> {
