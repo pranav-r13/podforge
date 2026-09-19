@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -8,6 +9,8 @@ use tokio::sync::Semaphore;
 use crate::convert::ffmpeg::{self, ConvertOptions};
 use crate::db::models::{Album, Track};
 use crate::db::{queries, DbState};
+use crate::import::cd_rip;
+use crate::metadata::tags::{self, TagPatch};
 
 /// Bounded worker pool for conversion jobs. Concurrency is capped so a bulk
 /// convert doesn't starve the UI or ripping -- see plan's `num_cpus / 2`
@@ -61,6 +64,44 @@ impl JobQueue {
         if let Some(pid) = pid {
             let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).output();
         }
+    }
+
+    /// Enqueues a CD track rip. Shares the same semaphore/pid-map as
+    /// conversion jobs -- ripping and converting are both I/O/CPU-bound
+    /// background work, so one bounded pool keeps total concurrency (and
+    /// `cancel`) consistent across both job types.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_rip(
+        &self,
+        app: AppHandle,
+        job_id: i64,
+        track: Track,
+        album_title: String,
+        album_artist: Option<String>,
+        device: String,
+        track_number: i32,
+        total_sectors: i64,
+        output_path: PathBuf,
+    ) {
+        let semaphore = self.semaphore.clone();
+        let running_pids = self.running_pids.clone();
+
+        tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.expect("semaphore closed");
+            run_rip_job(
+                app,
+                job_id,
+                track,
+                album_title,
+                album_artist,
+                device,
+                track_number,
+                total_sectors,
+                output_path,
+                running_pids,
+            )
+            .await;
+        });
     }
 }
 
@@ -119,6 +160,72 @@ async fn run_job(
             emit(&app, job_id, Some(track.id), "cancelled", 0.0, None);
         }
         Err(e) => finish_error(&app, job_id, Some(track.id), &e),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_rip_job(
+    app: AppHandle,
+    job_id: i64,
+    track: Track,
+    album_title: String,
+    album_artist: Option<String>,
+    device: String,
+    track_number: i32,
+    total_sectors: i64,
+    output_path: PathBuf,
+    running_pids: Arc<Mutex<HashMap<i64, u32>>>,
+) {
+    update_job(&app, job_id, "running", 0.0, None);
+    emit(&app, job_id, Some(track.id), "running", 0.0, None);
+
+    let progress_app = app.clone();
+    let pid_map = running_pids.clone();
+    let track_id = track.id;
+
+    let result = cd_rip::rip_track_with_progress(
+        &device,
+        track_number,
+        total_sectors,
+        &output_path,
+        move |fraction| {
+            update_job(&progress_app, job_id, "running", fraction, None);
+            emit(&progress_app, job_id, Some(track_id), "running", fraction, None);
+        },
+        move |pid| {
+            pid_map.lock().unwrap().insert(job_id, pid);
+        },
+    )
+    .await;
+
+    running_pids.lock().unwrap().remove(&job_id);
+
+    match result {
+        Ok(()) => {
+            let patch = TagPatch {
+                title: Some(track.title.clone()),
+                artist: track.artist.clone(),
+                album: Some(album_title),
+                album_artist,
+                track_number: track.track_number,
+                disc_number: track.disc_number,
+                ..Default::default()
+            };
+            if let Err(e) = tags::write_tags(&output_path, &patch) {
+                finish_error(&app, job_id, Some(track_id), &e.to_string());
+                return;
+            }
+            if let Ok(conn) = app.state::<DbState>().0.lock() {
+                let _ = queries::set_track_ripped(&conn, track_id);
+            }
+            update_job(&app, job_id, "done", 1.0, None);
+            emit(&app, job_id, Some(track_id), "done", 1.0, None);
+        }
+        Err(e) if e == "cancelled" => {
+            update_job(&app, job_id, "cancelled", 0.0, None);
+            emit(&app, job_id, Some(track_id), "cancelled", 0.0, None);
+        }
+        Err(e) => finish_error(&app, job_id, Some(track_id), &e),
     }
 }
 

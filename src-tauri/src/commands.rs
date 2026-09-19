@@ -4,8 +4,10 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::convert::ffmpeg::ConvertOptions;
 use crate::convert::job_queue::JobQueue;
-use crate::db::models::{Album, Job, Track};
+use crate::db::models::{Album, Job, PlannedTrack, Track};
 use crate::db::{queries, DbState};
+use crate::import::cd_detect::{self, CdInfo};
+use crate::import::disc_id;
 use crate::import::folder_scan;
 use crate::metadata::cover_art;
 use crate::metadata::ipod_fix::{self, FixReport};
@@ -31,6 +33,104 @@ pub fn scan_folder(state: State<DbState>, path: String) -> Result<Vec<Album>, St
         .into_iter()
         .map(|id| queries::get_album(&conn, id).map_err(|e| e.to_string()))
         .collect()
+}
+
+/// Polls for an inserted audio CD and reads its TOC. Returns `None` when no
+/// audio CD is present -- not an error, just "nothing to import yet".
+#[tauri::command]
+pub fn detect_cd() -> Option<CdInfo> {
+    let device = cd_detect::detect_cd()?;
+    let (mb_disc_id, track_count) = match disc_id::read_disc(&device) {
+        Ok(info) => (Some(info.disc_id), info.tracks.len() as i32),
+        Err(_) => (None, 0),
+    };
+    Some(CdInfo {
+        device,
+        disc_id: mb_disc_id,
+        track_count,
+    })
+}
+
+/// Disc-ID-based MusicBrainz lookup for a detected CD -- MB's most reliable
+/// match, when the exact pressing is catalogued. Always returns a list
+/// (possibly empty) for manual disambiguation, same contract as
+/// `lookup_musicbrainz`.
+#[tauri::command]
+pub fn lookup_cd_release(disc_id: String) -> Result<Vec<MbCandidate>, String> {
+    musicbrainz::lookup_by_discid(&disc_id)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CdImportResult {
+    pub album_id: i64,
+    pub job_ids: Vec<i64>,
+}
+
+/// Creates the album + track rows for a CD import and kicks off one rip job
+/// per track on the shared `JobQueue`. If `release_id` is given (from
+/// `lookup_cd_release` or the existing text-search `lookup_musicbrainz`),
+/// track titles/artist and album title/artist are pulled from that release
+/// instead of being left as "Track N" placeholders.
+#[tauri::command]
+pub fn rip_and_import_cd(
+    app: AppHandle,
+    state: State<DbState>,
+    job_queue: State<JobQueue>,
+    device: String,
+    release_id: Option<String>,
+) -> Result<CdImportResult, String> {
+    let disc = disc_id::read_disc(&device)?;
+    let release_detail = release_id.as_ref().and_then(|id| musicbrainz::fetch_release_detail(id).ok());
+
+    let album_title = release_detail
+        .as_ref()
+        .map(|r| r.title.clone())
+        .unwrap_or_else(|| "Unknown Album (CD import)".to_string());
+    let album_artist = release_detail.as_ref().map(|r| r.artist.clone());
+
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let album_id = queries::insert_cd_album(&conn, &album_title, album_artist.as_deref(), &device, release_id.as_deref())
+        .map_err(|e| e.to_string())?;
+    let rip_dir = cd_rip_dir(&app, album_id)?;
+
+    let mut job_ids = Vec::new();
+    for disc_track in &disc.tracks {
+        let release_track = release_detail
+            .as_ref()
+            .and_then(|r| r.tracks.iter().find(|t| t.number == i64::from(disc_track.number)));
+
+        let planned = PlannedTrack {
+            track_number: i64::from(disc_track.number),
+            title: release_track
+                .map(|t| t.title.clone())
+                .unwrap_or_else(|| format!("Track {}", disc_track.number)),
+            artist: release_track.and_then(|t| t.artist.clone()),
+            duration_ms: disc_track.duration_ms,
+            source_path: rip_dir
+                .join(format!("{:02}.wav", disc_track.number))
+                .to_string_lossy()
+                .to_string(),
+        };
+        let track_id = queries::insert_planned_track(&conn, album_id, &planned).map_err(|e| e.to_string())?;
+        let track = queries::get_track(&conn, track_id).map_err(|e| e.to_string())?;
+        let job_id = queries::insert_job(&conn, "rip", Some(track_id), Some(album_id)).map_err(|e| e.to_string())?;
+        job_ids.push(job_id);
+
+        let output_path = PathBuf::from(&track.source_path);
+        job_queue.spawn_rip(
+            app.clone(),
+            job_id,
+            track,
+            album_title.clone(),
+            album_artist.clone(),
+            device.clone(),
+            disc_track.number,
+            disc_track.sectors,
+            output_path,
+        );
+    }
+
+    Ok(CdImportResult { album_id, job_ids })
 }
 
 #[tauri::command]
@@ -208,6 +308,17 @@ fn cover_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("covers");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn cd_rip_dir(app: &AppHandle, album_id: i64) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("cd_rips")
+        .join(album_id.to_string());
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }

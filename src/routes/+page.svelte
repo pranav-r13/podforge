@@ -6,6 +6,8 @@
   import { onDestroy, onMount } from "svelte";
   import type {
     Album,
+    CdImportResult,
+    CdInfo,
     ConvertFormat,
     FixReport,
     Job,
@@ -39,6 +41,12 @@
   let mbCandidates = $state<MbCandidate[]>([]);
   let mbApplyingId = $state<string | null>(null);
   let coverUploading = $state(false);
+
+  let showCdDialog = $state(false);
+  let cdDetecting = $state(false);
+  let cdInfo = $state<CdInfo | null>(null);
+  let cdCandidates = $state<MbCandidate[]>([]);
+  let cdImportingId = $state<string | null>(null); // release_id being imported, or "" for skip-match
 
   const qualityPresets: Record<ConvertFormat, { label: string; value: string }[]> = {
     mp3: [
@@ -127,6 +135,52 @@
       error = String(e);
     } finally {
       loading = false;
+    }
+  }
+
+  async function openCdDialog() {
+    showCdDialog = true;
+    cdDetecting = true;
+    cdInfo = null;
+    cdCandidates = [];
+    error = null;
+    try {
+      cdInfo = await invoke<CdInfo | null>("detect_cd");
+      if (cdInfo?.disc_id) {
+        cdCandidates = await invoke<MbCandidate[]>("lookup_cd_release", { discId: cdInfo.disc_id });
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      cdDetecting = false;
+    }
+  }
+
+  function closeCdDialog() {
+    showCdDialog = false;
+    cdInfo = null;
+    cdCandidates = [];
+  }
+
+  async function startCdRip(releaseId: string | null) {
+    if (!cdInfo) return;
+    cdImportingId = releaseId ?? "";
+    error = null;
+    try {
+      const result = await invoke<CdImportResult>("rip_and_import_cd", {
+        device: cdInfo.device,
+        releaseId,
+      });
+      await loadLibrary();
+      selectedAlbumId = result.album_id;
+      jobsPanelOpen = true;
+      showCdDialog = false;
+      cdInfo = null;
+      cdCandidates = [];
+    } catch (e) {
+      error = String(e);
+    } finally {
+      cdImportingId = null;
     }
   }
 
@@ -406,13 +460,21 @@
   <aside class="flex w-72 shrink-0 flex-col border-r border-neutral-200 dark:border-neutral-800">
     <div class="flex items-center justify-between px-4 py-3">
       <h1 class="text-sm font-medium text-neutral-500 dark:text-neutral-400">Albums</h1>
-      <button
-        onclick={importFolder}
-        disabled={loading}
-        class="rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
-      >
-        {loading ? "Scanning…" : "Import Folder"}
-      </button>
+      <div class="flex gap-2">
+        <button
+          onclick={openCdDialog}
+          class="rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900"
+        >
+          Import CD
+        </button>
+        <button
+          onclick={importFolder}
+          disabled={loading}
+          class="rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+        >
+          {loading ? "Scanning…" : "Import Folder"}
+        </button>
+      </div>
     </div>
 
     {#if error}
@@ -725,6 +787,82 @@
               </li>
             {/each}
           </ul>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  {#if showCdDialog}
+    <div
+      class="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      role="button"
+      tabindex="-1"
+      onclick={closeCdDialog}
+      onkeydown={(e) => e.key === "Escape" && closeCdDialog()}
+    >
+      <div
+        role="dialog"
+        tabindex="-1"
+        class="max-h-[70vh] w-[32rem] overflow-y-auto rounded-lg bg-white p-4 shadow-xl dark:bg-neutral-900"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.stopPropagation()}
+      >
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-sm font-medium">Import CD</h3>
+          <button onclick={closeCdDialog} class="text-xs text-neutral-400">Close</button>
+        </div>
+
+        {#if cdDetecting}
+          <p class="text-sm text-neutral-400">Detecting disc…</p>
+        {:else if !cdInfo}
+          <p class="text-sm text-neutral-400">
+            No audio CD detected. Insert a disc and try again.
+          </p>
+          <button
+            onclick={openCdDialog}
+            class="mt-3 rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900"
+          >
+            Retry
+          </button>
+        {:else}
+          <p class="mb-3 text-xs text-neutral-500 dark:text-neutral-400">
+            {cdInfo.device} · {cdInfo.track_count} tracks
+            {#if !cdInfo.disc_id}· disc ID unavailable, matching skipped{/if}
+          </p>
+
+          {#if cdInfo.disc_id && cdCandidates.length > 0}
+            <ul class="space-y-1">
+              {#each cdCandidates as candidate (candidate.release_id)}
+                <li>
+                  <button
+                    onclick={() => startCdRip(candidate.release_id)}
+                    disabled={cdImportingId !== null}
+                    class="flex w-full flex-col items-start rounded-md border border-neutral-200 px-3 py-2 text-left text-sm hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-800 dark:hover:bg-neutral-800"
+                  >
+                    <span class="font-medium">{candidate.title}</span>
+                    <span class="text-xs text-neutral-500 dark:text-neutral-400">
+                      {candidate.artist}
+                      {#if candidate.date}· {candidate.date}{/if}
+                      {#if candidate.country}· {candidate.country}{/if}
+                    </span>
+                    {#if cdImportingId === candidate.release_id}
+                      <span class="mt-1 text-xs text-neutral-400">Starting rip…</span>
+                    {/if}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {:else if cdInfo.disc_id}
+            <p class="text-sm text-neutral-400">No exact MusicBrainz disc match. Rip now and match tags/art afterward.</p>
+          {/if}
+
+          <button
+            onclick={() => startCdRip(null)}
+            disabled={cdImportingId !== null}
+            class="mt-3 w-full rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+          >
+            {cdImportingId === "" ? "Starting rip…" : "Rip without a match"}
+          </button>
         {/if}
       </div>
     </div>

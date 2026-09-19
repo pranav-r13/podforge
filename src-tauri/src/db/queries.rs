@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 
-use super::models::{Album, Job, ScannedAlbum, Track};
+use super::models::{Album, Job, PlannedTrack, ScannedAlbum, Track};
 use crate::metadata::tags::TagPatch;
 
 /// Inserts a scanned album and its tracks in a single transaction.
@@ -42,6 +42,47 @@ pub fn insert_scanned_album(conn: &mut Connection, album: &ScannedAlbum) -> rusq
 
     tx.commit()?;
     Ok(album_id)
+}
+
+/// Inserts a CD album header row. Tracks are inserted separately via
+/// `insert_planned_track` once this call's id is known, since each track's
+/// planned WAV path is namespaced by album id.
+pub fn insert_cd_album(
+    conn: &Connection,
+    title: &str,
+    album_artist: Option<&str>,
+    device: &str,
+    release_id: Option<&str>,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO albums (title, album_artist, source_type, source_path, musicbrainz_release_id)
+         VALUES (?1, ?2, 'cd', ?3, ?4)",
+        params![title, album_artist, device, release_id],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Inserts one not-yet-ripped CD track row. `source_path` points at where
+/// the WAV file will land once the rip job for it completes.
+pub fn insert_planned_track(conn: &Connection, album_id: i64, track: &PlannedTrack) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO tracks (album_id, track_number, title, artist, duration_ms, source_path, status, codec, container)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', 'pcm_s16le', 'wav')",
+        params![
+            album_id,
+            track.track_number,
+            track.title,
+            track.artist,
+            track.duration_ms,
+            track.source_path,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn set_track_ripped(conn: &Connection, track_id: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE tracks SET status = 'ripped' WHERE id = ?1", params![track_id])?;
+    Ok(())
 }
 
 fn row_to_track(row: &rusqlite::Row) -> rusqlite::Result<Track> {

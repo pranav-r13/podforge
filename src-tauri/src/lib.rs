@@ -27,6 +27,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::scan_folder,
+            commands::detect_cd,
+            commands::lookup_cd_release,
+            commands::rip_and_import_cd,
             commands::get_library,
             commands::get_album,
             commands::update_track_tags,

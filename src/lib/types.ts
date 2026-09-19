@@ -56,6 +56,17 @@ export interface MbCandidate {
   disambiguation: string | null;
 }
 
+export interface CdInfo {
+  device: string;
+  disc_id: string | null;
+  track_count: number;
+}
+
+export interface CdImportResult {
+  album_id: number;
+  job_ids: number[];
+}
+
 export type ConvertFormat = "mp3" | "alac" | "flac" | "aac";
 
 export interface Job {

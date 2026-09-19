@@ -57,6 +57,17 @@ pub struct ScannedAlbum {
     pub tracks: Vec<ScannedTrack>,
 }
 
+/// A CD track queued for ripping: DB row is inserted before the audio file
+/// exists, so `source_path` is the WAV path it *will* be written to.
+#[derive(Debug, Clone)]
+pub struct PlannedTrack {
+    pub track_number: i64,
+    pub title: String,
+    pub artist: Option<String>,
+    pub duration_ms: i64,
+    pub source_path: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScannedTrack {
     pub disc_number: Option<i64>,
