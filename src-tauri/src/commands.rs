@@ -1,11 +1,13 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::db::models::{Album, Track};
 use crate::db::{queries, DbState};
 use crate::import::folder_scan;
+use crate::metadata::cover_art;
 use crate::metadata::ipod_fix::{self, FixReport};
+use crate::metadata::musicbrainz::{self, MbCandidate};
 use crate::metadata::tags::{self, TagPatch};
 
 #[tauri::command]
@@ -79,4 +81,86 @@ fn apply_patch(conn: &rusqlite::Connection, track_id: i64, patch: &TagPatch) -> 
 pub fn apply_ipod_compat_fix(state: State<DbState>, album_id: i64) -> Result<FixReport, String> {
     let mut conn = state.0.lock().map_err(|e| e.to_string())?;
     ipod_fix::apply_ipod_compat_fix(&mut conn, album_id).map_err(|e| e.to_string())
+}
+
+/// Text-searches MusicBrainz for release candidates matching the album's
+/// current artist/title tags. Always returns a list for manual
+/// disambiguation -- never auto-picks, since text search on common
+/// artist/album names routinely returns several plausible releases.
+#[tauri::command]
+pub fn lookup_musicbrainz(state: State<DbState>, album_id: i64) -> Result<Vec<MbCandidate>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let album = queries::get_album(&conn, album_id).map_err(|e| e.to_string())?;
+    let artist = album.album_artist.clone().unwrap_or_default();
+    musicbrainz::search_release(&artist, &album.title)
+}
+
+/// Records the chosen MusicBrainz release on the album, then best-effort
+/// fetches and embeds its front cover from the Cover Art Archive. A release
+/// with no cover art is a normal outcome, not a failure of the match itself.
+#[tauri::command]
+pub fn apply_musicbrainz_match(app: AppHandle, state: State<DbState>, album_id: i64, release_id: String) -> Result<Album, String> {
+    {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        queries::set_album_musicbrainz_release(&conn, album_id, &release_id).map_err(|e| e.to_string())?;
+    }
+
+    if let Ok((bytes, mime)) = cover_art::fetch_front_cover(&release_id) {
+        apply_cover_bytes(&app, &state, album_id, bytes, &mime)?;
+    }
+
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    queries::get_album(&conn, album_id).map_err(|e| e.to_string())
+}
+
+/// Manual cover art fallback for when MusicBrainz has no match or no art:
+/// embeds a user-picked local image file into every track of the album.
+#[tauri::command]
+pub fn set_cover_art(app: AppHandle, state: State<DbState>, album_id: i64, image_path: String) -> Result<Album, String> {
+    let bytes = std::fs::read(&image_path).map_err(|e| e.to_string())?;
+    let mime = mime_from_extension(Path::new(&image_path));
+    apply_cover_bytes(&app, &state, album_id, bytes, mime)?;
+
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    queries::get_album(&conn, album_id).map_err(|e| e.to_string())
+}
+
+fn apply_cover_bytes(app: &AppHandle, state: &State<DbState>, album_id: i64, bytes: Vec<u8>, mime: &str) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let album = queries::get_album(&conn, album_id).map_err(|e| e.to_string())?;
+
+    let ext = if mime == "image/png" { "png" } else { "jpg" };
+    let dir = cover_dir(app)?;
+    let file_path = dir.join(format!("{album_id}.{ext}"));
+    std::fs::write(&file_path, &bytes).map_err(|e| e.to_string())?;
+
+    for track in &album.tracks {
+        tags::embed_cover_art(Path::new(&track.source_path), bytes.clone(), mime)
+            .map_err(|e| e.to_string())?;
+    }
+
+    queries::set_album_cover_art_path(&conn, album_id, &file_path.to_string_lossy())
+        .map_err(|e| e.to_string())
+}
+
+fn cover_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("covers");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn mime_from_extension(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        _ => "image/jpeg",
+    }
 }

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use lofty::config::WriteOptions;
 use lofty::file::TaggedFileExt;
+use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, Tag, TagExt};
 use serde::Deserialize;
@@ -68,6 +69,45 @@ pub fn write_tags(path: &Path, patch: &TagPatch) -> Result<(), TagError> {
     if let Some(v) = patch.disc_number {
         tag.set_disk(v as u32);
     }
+
+    tag.save_to_path(path, WriteOptions::default())
+        .map_err(|e| TagError::Write(path.display().to_string(), e))
+}
+
+fn mime_type_from_str(mime: &str) -> MimeType {
+    match mime {
+        "image/png" => MimeType::Png,
+        "image/gif" => MimeType::Gif,
+        "image/bmp" => MimeType::Bmp,
+        "image/tiff" => MimeType::Tiff,
+        "image/jpeg" | "image/jpg" => MimeType::Jpeg,
+        other => MimeType::Unknown(other.to_string()),
+    }
+}
+
+/// Replaces the front cover art on the file at `path`, leaving every other
+/// tag field untouched. Any existing front cover is dropped first -- lofty
+/// otherwise just appends, leaving stale art alongside the new image.
+pub fn embed_cover_art(path: &Path, image_bytes: Vec<u8>, mime: &str) -> Result<(), TagError> {
+    let mut tagged_file = Probe::open(path)
+        .and_then(|p| p.read())
+        .map_err(|e| TagError::Read(path.display().to_string(), e))?;
+
+    if tagged_file.primary_tag().is_none() {
+        let tag_type = tagged_file.primary_tag_type();
+        tagged_file.insert_tag(Tag::new(tag_type));
+    }
+    let tag = tagged_file
+        .primary_tag_mut()
+        .expect("tag was just inserted if missing");
+
+    tag.remove_picture_type(PictureType::CoverFront);
+    tag.push_picture(Picture::new_unchecked(
+        PictureType::CoverFront,
+        Some(mime_type_from_str(mime)),
+        None,
+        image_bytes,
+    ));
 
     tag.save_to_path(path, WriteOptions::default())
         .map_err(|e| TagError::Write(path.display().to_string(), e))

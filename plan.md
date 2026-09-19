@@ -118,19 +118,22 @@ Design: single accent color, system font stack, no sidebar icons-as-decoration, 
 
 ## Build Phases (in order, each independently testable)
 
-**Phase 0 — Scaffold**
+**Phase 0 — Scaffold — DONE**
 `npm create tauri-app` (Svelte-TS template), wire rusqlite + refinery migrations, empty window boots, `cargo tauri dev` works.
 
-**Phase 1 — Folder import + library view**
+**Phase 1 — Folder import + library view — DONE**
 `folder_scan.rs` walks a dir, reads tags via lofty, groups by folder (or embedded album tag if present), inserts into DB. Library screen renders it. Test against existing `FLAC1`/`FLAC2`/`808s and heartbreaks` folders.
 
-**Phase 2 — Bulk tag edit + iPod compat fix**
+**Phase 2 — Bulk tag edit + iPod compat fix — DONE**
 Inline track edit, bulk-edit panel, `ipod_fix.rs` port of instructions.md steps 2–4 (force album/album_artist uniform, ffprobe codec check, re-encode FLAC-in-mp3). This alone replaces the manual shell workflow.
+Shipped in commit `4b53d25`: `commands::update_track_tags`, `bulk_update_tags`, `apply_ipod_compat_fix`; `metadata/tags.rs` (lofty read/write wrapper), `metadata/ipod_fix.rs` (ffprobe codec check + ffmpeg re-encode-in-place). Frontend: inline title/track# edit (dblclick), bulk-edit slide-over, "Fix iPod Compatibility" button + report panel in `+page.svelte`.
 
-**Phase 3 — Cover art**
+**Phase 3 — Cover art — DONE**
 MusicBrainz Cover Art Archive fetch by release id (once matched) + manual drag-drop image fallback, embed via lofty, one-click apply to whole album.
+Shipped this session (uncommitted — see Handoff below): `metadata/musicbrainz.rs` (text search `release:"album" AND artist:"artist"` against `/ws/2/release/`, 1 req/sec self-rate-limited, returns candidates for manual disambiguation — no disc-ID lookup yet, that's Phase 5), `metadata/cover_art.rs` (Cover Art Archive `/release/{mbid}/front` fetch), `metadata/tags.rs::embed_cover_art` (lofty `Picture`/`PictureType::CoverFront`, replaces any existing front cover before pushing). New commands: `lookup_musicbrainz`, `apply_musicbrainz_match` (sets release id + best-effort auto-fetches art), `set_cover_art` (manual file picker fallback — no drag-drop yet, uses the existing `tauri-plugin-dialog` file picker instead, same UX outcome). Covers are copied to `$APPDATA/covers/{album_id}.{ext}` and displayed via `convertFileSrc` (needed adding `assetProtocol` scope to `tauri.conf.json` + the `protocol-asset` cargo feature on `tauri`). Frontend: cover thumbnail in sidebar + album header, "Find Cover Art" modal (lists MB candidates, click to apply), "Upload Cover" button.
+Known gap: MusicBrainz User-Agent is hardcoded in `musicbrainz.rs`/`cover_art.rs` (`const USER_AGENT`) — plan's Phase 6 wants this as a required Settings field (`mb_user_agent`); move it there once Settings exists instead of leaving it hardcoded.
 
-**Phase 4 — Conversion pipeline**
+**Phase 4 — Conversion pipeline — NEXT UP**
 `ffmpeg.rs` command builder (mirrors instructions.md ffmpeg invocation: map audio+cover streams, correct codec flags per target format), `job_queue.rs` worker pool, Convert dialog, Jobs panel with live progress (`ffmpeg -progress pipe:1` parsed per job).
 
 **Phase 5 — CD import**
@@ -141,6 +144,18 @@ Settings screen, structured logging (`tracing` crate, log file under `~/Library/
 
 **Phase 7 — Tests**
 Unit tests: tag round-trip (write then read back via lofty), ffmpeg command construction (assert argv, no actual encode), MusicBrainz JSON parsing against saved fixture responses. Manual QA matrix: FLAC→MP3, FLAC→ALAC, MP3→ALAC, bulk 20+ track album, CD rip end-to-end with a physical disc.
+
+## Handoff (2026-09-19)
+
+Repo state right now:
+- `main` branch, last pushed commit `4b53d25` ("feat: bulk tag edit + iPod compat fix (Phase 2)").
+- Working tree has **uncommitted Phase 3 (cover art) changes**, not yet committed or pushed:
+  - New: `src-tauri/src/metadata/musicbrainz.rs`, `src-tauri/src/metadata/cover_art.rs`
+  - Modified: `src-tauri/Cargo.toml` (added `reqwest` blocking+json+rustls-tls, `tauri` gained `protocol-asset` feature), `src-tauri/tauri.conf.json` (added `app.security.assetProtocol` scope for `$APPDATA/covers/*`), `src-tauri/src/metadata/mod.rs`, `src-tauri/src/metadata/tags.rs` (added `embed_cover_art`), `src-tauri/src/db/queries.rs` (added `set_album_musicbrainz_release`, `set_album_cover_art_path`), `src-tauri/src/commands.rs` (added `lookup_musicbrainz`, `apply_musicbrainz_match`, `set_cover_art`), `src-tauri/src/lib.rs` (registered the 3 new commands), `src/lib/types.ts` (added `MbCandidate`), `src/routes/+page.svelte` (cover thumbnails, "Find Cover Art" modal, "Upload Cover" button).
+  - Both `cargo build --manifest-path src-tauri/Cargo.toml` and `npx svelte-check` pass clean as of this session. Not yet run through `cargo tauri dev` for a manual click-through — do that before committing, then commit as a Phase 3 feat commit and push.
+- Next action for a fresh session: manually smoke-test cover art (folder-import an album, "Find Cover Art" → pick a match → confirm image shows in sidebar+header and is embedded in the actual file via `ffprobe`/a player; also test "Upload Cover" fallback), then commit + push, then start **Phase 4 — Conversion pipeline** (`convert/ffmpeg.rs` command builder, `convert/job_queue.rs` tokio semaphore worker pool + SQLite-persisted job state, Convert dialog + Jobs panel with live progress via `ffmpeg -progress pipe:1`).
+- `jobs` table and `settings` table exist in the schema (`V1__init.sql`) but have no queries/commands touching them yet — Phase 4 is the first phase that needs them.
+- No `tokio` crate dependency yet — Phase 4's job queue needs it; Tauri 2 bundles an async runtime for `async fn` commands but the plan's semaphore worker pool wants explicit `tokio` (with `sync`/`process` features) added to `Cargo.toml`.
 
 ## Known risks to plan around
 - MusicBrainz disc-ID lookup fails for many pressings (no exact TOC match) — must build manual search/match fallback from day one, not as an edge case.

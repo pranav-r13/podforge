@@ -28,6 +28,9 @@ pub fn run() {
             commands::update_track_tags,
             commands::bulk_update_tags,
             commands::apply_ipod_compat_fix,
+            commands::lookup_musicbrainz,
+            commands::apply_musicbrainz_match,
+            commands::set_cover_art,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

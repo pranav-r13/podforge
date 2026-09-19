@@ -46,3 +46,12 @@ export interface FixReport {
   tracks_reencoded: string[];
   errors: string[];
 }
+
+export interface MbCandidate {
+  release_id: string;
+  title: string;
+  artist: string;
+  date: string | null;
+  country: string | null;
+  disambiguation: string | null;
+}

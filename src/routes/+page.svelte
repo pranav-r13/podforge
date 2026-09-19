@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { convertFileSrc, invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
-  import type { Album, FixReport, TagPatch } from "$lib/types";
+  import type { Album, FixReport, MbCandidate, TagPatch } from "$lib/types";
 
   let albums = $state<Album[]>([]);
   let selectedAlbumId = $state<number | null>(null);
@@ -23,9 +23,22 @@
   let fixing = $state(false);
   let fixReport = $state<FixReport | null>(null);
 
+  let coverVersion = $state(0);
+  let showMbDialog = $state(false);
+  let mbSearching = $state(false);
+  let mbCandidates = $state<MbCandidate[]>([]);
+  let mbApplyingId = $state<string | null>(null);
+  let coverUploading = $state(false);
+
   let selectedAlbum = $derived(
     albums.find((a) => a.id === selectedAlbumId) ?? null,
   );
+
+  function coverSrc(path: string): string {
+    // cache-bust: cover_art_path is stable but its file contents can change
+    // in place (re-match, re-upload), so an unchanged path wouldn't reload.
+    return `${convertFileSrc(path)}?v=${coverVersion}`;
+  }
 
   async function loadLibrary() {
     try {
@@ -172,6 +185,71 @@
     }
   }
 
+  async function openMbDialog() {
+    if (!selectedAlbum) return;
+    showMbDialog = true;
+    mbSearching = true;
+    mbCandidates = [];
+    error = null;
+    try {
+      mbCandidates = await invoke<MbCandidate[]>("lookup_musicbrainz", {
+        albumId: selectedAlbum.id,
+      });
+    } catch (e) {
+      error = String(e);
+    } finally {
+      mbSearching = false;
+    }
+  }
+
+  function closeMbDialog() {
+    showMbDialog = false;
+    mbCandidates = [];
+  }
+
+  async function applyMbMatch(releaseId: string) {
+    if (!selectedAlbum) return;
+    mbApplyingId = releaseId;
+    error = null;
+    try {
+      await invoke("apply_musicbrainz_match", {
+        albumId: selectedAlbum.id,
+        releaseId,
+      });
+      await loadLibrary();
+      coverVersion += 1;
+      showMbDialog = false;
+      mbCandidates = [];
+    } catch (e) {
+      error = String(e);
+    } finally {
+      mbApplyingId = null;
+    }
+  }
+
+  async function uploadCoverArt() {
+    if (!selectedAlbum) return;
+    const path = await open({
+      multiple: false,
+      filters: [{ name: "Image", extensions: ["jpg", "jpeg", "png"] }],
+    });
+    if (!path) return;
+    coverUploading = true;
+    error = null;
+    try {
+      await invoke("set_cover_art", {
+        albumId: selectedAlbum.id,
+        imagePath: path,
+      });
+      await loadLibrary();
+      coverVersion += 1;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      coverUploading = false;
+    }
+  }
+
   onMount(loadLibrary);
 </script>
 
@@ -208,11 +286,19 @@
             ? 'bg-neutral-100 dark:bg-neutral-900'
             : ''}"
         >
-          <div
-            class="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-neutral-200 text-sm font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400"
-          >
-            {album.title.charAt(0).toUpperCase()}
-          </div>
+          {#if album.cover_art_path}
+            <img
+              src={coverSrc(album.cover_art_path)}
+              alt=""
+              class="h-10 w-10 shrink-0 rounded object-cover"
+            />
+          {:else}
+            <div
+              class="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-neutral-200 text-sm font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400"
+            >
+              {album.title.charAt(0).toUpperCase()}
+            </div>
+          {/if}
           <div class="min-w-0 flex-1">
             <p class="truncate text-sm font-medium">{album.title}</p>
             <p class="truncate text-xs text-neutral-500 dark:text-neutral-400">
@@ -229,12 +315,42 @@
     {#if selectedAlbum}
       <div class="px-8 py-6">
         <div class="flex items-start justify-between">
-          <div>
-            <h2 class="text-xl font-semibold">{selectedAlbum.title}</h2>
-            <p class="text-sm text-neutral-500 dark:text-neutral-400">
-              {selectedAlbum.album_artist ?? "Unknown Artist"}
-              {#if selectedAlbum.year}· {selectedAlbum.year}{/if}
-            </p>
+          <div class="flex items-start gap-4">
+            {#if selectedAlbum.cover_art_path}
+              <img
+                src={coverSrc(selectedAlbum.cover_art_path)}
+                alt=""
+                class="h-20 w-20 shrink-0 rounded object-cover"
+              />
+            {:else}
+              <div
+                class="flex h-20 w-20 shrink-0 items-center justify-center rounded bg-neutral-200 text-2xl font-medium text-neutral-400 dark:bg-neutral-800 dark:text-neutral-600"
+              >
+                {selectedAlbum.title.charAt(0).toUpperCase()}
+              </div>
+            {/if}
+            <div>
+              <h2 class="text-xl font-semibold">{selectedAlbum.title}</h2>
+              <p class="text-sm text-neutral-500 dark:text-neutral-400">
+                {selectedAlbum.album_artist ?? "Unknown Artist"}
+                {#if selectedAlbum.year}· {selectedAlbum.year}{/if}
+              </p>
+              <div class="mt-2 flex gap-2">
+                <button
+                  onclick={openMbDialog}
+                  class="rounded-md border border-neutral-300 px-2 py-1 text-xs font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900"
+                >
+                  Find Cover Art
+                </button>
+                <button
+                  onclick={uploadCoverArt}
+                  disabled={coverUploading}
+                  class="rounded-md border border-neutral-300 px-2 py-1 text-xs font-medium hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:hover:bg-neutral-900"
+                >
+                  {coverUploading ? "Uploading…" : "Upload Cover"}
+                </button>
+              </div>
+            </div>
           </div>
           <button
             onclick={fixIpodCompat}
@@ -402,5 +518,59 @@
         </button>
       </div>
     </aside>
+  {/if}
+
+  {#if showMbDialog}
+    <div
+      class="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      role="button"
+      tabindex="-1"
+      onclick={closeMbDialog}
+      onkeydown={(e) => e.key === "Escape" && closeMbDialog()}
+    >
+      <div
+        role="dialog"
+        tabindex="-1"
+        class="max-h-[70vh] w-[32rem] overflow-y-auto rounded-lg bg-white p-4 shadow-xl dark:bg-neutral-900"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.stopPropagation()}
+      >
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-sm font-medium">MusicBrainz matches</h3>
+          <button onclick={closeMbDialog} class="text-xs text-neutral-400">Close</button>
+        </div>
+
+        {#if mbSearching}
+          <p class="text-sm text-neutral-400">Searching…</p>
+        {:else if mbCandidates.length === 0}
+          <p class="text-sm text-neutral-400">
+            No matches found. Try adjusting the album/artist tags, or upload a cover manually.
+          </p>
+        {:else}
+          <ul class="space-y-1">
+            {#each mbCandidates as candidate (candidate.release_id)}
+              <li>
+                <button
+                  onclick={() => applyMbMatch(candidate.release_id)}
+                  disabled={mbApplyingId !== null}
+                  class="flex w-full flex-col items-start rounded-md border border-neutral-200 px-3 py-2 text-left text-sm hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-800 dark:hover:bg-neutral-800"
+                >
+                  <span class="font-medium">{candidate.title}</span>
+                  <span class="text-xs text-neutral-500 dark:text-neutral-400">
+                    {candidate.artist}
+                    {#if candidate.date}· {candidate.date}{/if}
+                    {#if candidate.country}· {candidate.country}{/if}
+                    {#if candidate.disambiguation}· {candidate.disambiguation}{/if}
+                  </span>
+                  {#if mbApplyingId === candidate.release_id}
+                    <span class="mt-1 text-xs text-neutral-400">Applying…</span>
+                  {/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    </div>
   {/if}
 </div>

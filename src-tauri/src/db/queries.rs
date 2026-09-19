@@ -114,6 +114,22 @@ pub fn update_album_fields(conn: &Connection, album_id: i64, patch: &TagPatch) -
     Ok(())
 }
 
+pub fn set_album_musicbrainz_release(conn: &Connection, album_id: i64, release_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE albums SET musicbrainz_release_id = ?1 WHERE id = ?2",
+        params![release_id, album_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_album_cover_art_path(conn: &Connection, album_id: i64, path: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE albums SET cover_art_path = ?1 WHERE id = ?2",
+        params![path, album_id],
+    )?;
+    Ok(())
+}
+
 pub fn update_track_codec(conn: &Connection, track_id: i64, codec: &str, container: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE tracks SET codec = ?1, container = ?2 WHERE id = ?3",
