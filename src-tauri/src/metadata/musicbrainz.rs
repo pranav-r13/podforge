@@ -3,10 +3,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-/// MusicBrainz ToS requires a descriptive User-Agent identifying the app.
-/// TODO(Phase 6): move to Settings (`mb_user_agent`) once the settings
-/// screen exists, so users can put their own contact info in it.
-const USER_AGENT: &str = "Podforge/0.1.0 ( https://github.com/pranav-r13/podforge )";
+/// MusicBrainz ToS requires a descriptive User-Agent identifying the app and
+/// contact info. Callers pass the `mb_user_agent` Settings value through
+/// (see `commands.rs`), which refuses to call MusicBrainz at all if it's blank.
+pub const DEFAULT_USER_AGENT: &str = "Podforge/0.1.0 ( https://github.com/pranav-r13/podforge )";
 
 const SEARCH_URL: &str = "https://musicbrainz.org/ws/2/release/";
 const DISCID_URL: &str = "https://musicbrainz.org/ws/2/discid/";
@@ -61,7 +61,7 @@ fn rate_limit() {
 /// There's no disc-ID to key off for folder imports, so this is a best-effort
 /// text match -- the caller must show candidates for manual disambiguation,
 /// never auto-apply the top hit.
-pub fn search_release(artist: &str, album: &str) -> Result<Vec<MbCandidate>, String> {
+pub fn search_release(user_agent: &str, artist: &str, album: &str) -> Result<Vec<MbCandidate>, String> {
     let query = format!(
         "release:\"{}\" AND artist:\"{}\"",
         album.replace('"', ""),
@@ -73,12 +73,17 @@ pub fn search_release(artist: &str, album: &str) -> Result<Vec<MbCandidate>, Str
     let response = client
         .get(SEARCH_URL)
         .query(&[("query", query.as_str()), ("fmt", "json"), ("limit", "10")])
-        .header("User-Agent", USER_AGENT)
+        .header("User-Agent", user_agent)
         .send()
-        .map_err(|e| format!("MusicBrainz request failed: {e}"))?;
+        .map_err(|e| {
+            tracing::warn!(error = %e, "musicbrainz search_release request failed");
+            format!("MusicBrainz request failed: {e}")
+        })?;
 
     if !response.status().is_success() {
-        return Err(format!("MusicBrainz returned status {}", response.status()));
+        let status = response.status();
+        tracing::warn!(%status, "musicbrainz search_release returned non-success status");
+        return Err(format!("MusicBrainz returned status {status}"));
     }
 
     let parsed: SearchResponse = response
@@ -115,13 +120,13 @@ struct DiscIdLookupResponse {
 /// promos) returns no releases here, which is a normal outcome, not an
 /// error -- the caller falls back to `search_release` for manual
 /// disambiguation.
-pub fn lookup_by_discid(disc_id: &str) -> Result<Vec<MbCandidate>, String> {
+pub fn lookup_by_discid(user_agent: &str, disc_id: &str) -> Result<Vec<MbCandidate>, String> {
     rate_limit();
     let client = reqwest::blocking::Client::new();
     let response = client
         .get(format!("{DISCID_URL}{disc_id}"))
         .query(&[("fmt", "json"), ("inc", "artist-credits")])
-        .header("User-Agent", USER_AGENT)
+        .header("User-Agent", user_agent)
         .send()
         .map_err(|e| format!("MusicBrainz request failed: {e}"))?;
 
@@ -181,13 +186,13 @@ struct TrackJson {
 /// tracks can be tagged immediately instead of left as "Track N"
 /// placeholders. Only the first medium is used -- multi-disc box sets
 /// aren't disambiguated by disc number yet.
-pub fn fetch_release_detail(release_id: &str) -> Result<ReleaseDetail, String> {
+pub fn fetch_release_detail(user_agent: &str, release_id: &str) -> Result<ReleaseDetail, String> {
     rate_limit();
     let client = reqwest::blocking::Client::new();
     let response = client
         .get(format!("{RELEASE_URL}{release_id}"))
         .query(&[("fmt", "json"), ("inc", "recordings+artist-credits")])
-        .header("User-Agent", USER_AGENT)
+        .header("User-Agent", user_agent)
         .send()
         .map_err(|e| format!("MusicBrainz request failed: {e}"))?;
 

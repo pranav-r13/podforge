@@ -29,15 +29,22 @@ struct JobProgressEvent {
     error: Option<String>,
 }
 
-fn default_concurrency() -> usize {
+/// `num_cpus / 2`, rounded down and floored at 1 -- see plan's concurrency
+/// guidance for CPU-heavy ffmpeg jobs. Used as the Settings default and
+/// whenever the `concurrency` setting is missing or invalid.
+pub fn default_concurrency() -> usize {
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     (cpus / 2).max(1)
 }
 
 impl JobQueue {
-    pub fn new() -> Self {
+    /// `concurrency` is read once at startup from Settings (falling back to
+    /// `default_concurrency()`); changing it later takes effect on next
+    /// launch, since a `tokio::sync::Semaphore` can't shrink its permit
+    /// count once tasks may already hold one.
+    pub fn new(concurrency: usize) -> Self {
         Self {
-            semaphore: Arc::new(Semaphore::new(default_concurrency())),
+            semaphore: Arc::new(Semaphore::new(concurrency.max(1))),
             running_pids: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -113,6 +120,7 @@ async fn run_job(
     options: ConvertOptions,
     running_pids: Arc<Mutex<HashMap<i64, u32>>>,
 ) {
+    tracing::info!(job_id, track_id = track.id, format = %options.format, "conversion job started");
     update_job(&app, job_id, "running", 0.0, None);
     emit(&app, job_id, Some(track.id), "running", 0.0, None);
 
@@ -152,6 +160,7 @@ async fn run_job(
             if let Ok(conn) = app.state::<DbState>().0.lock() {
                 let _ = queries::set_track_output_path(&conn, track.id, &output_str);
             }
+            tracing::info!(job_id, track_id = track.id, "conversion job done");
             update_job(&app, job_id, "done", 1.0, None);
             emit(&app, job_id, Some(track.id), "done", 1.0, None);
         }
@@ -176,6 +185,7 @@ async fn run_rip_job(
     output_path: PathBuf,
     running_pids: Arc<Mutex<HashMap<i64, u32>>>,
 ) {
+    tracing::info!(job_id, track_id = track.id, device = %device, "rip job started");
     update_job(&app, job_id, "running", 0.0, None);
     emit(&app, job_id, Some(track.id), "running", 0.0, None);
 
@@ -218,6 +228,7 @@ async fn run_rip_job(
             if let Ok(conn) = app.state::<DbState>().0.lock() {
                 let _ = queries::set_track_ripped(&conn, track_id);
             }
+            tracing::info!(job_id, track_id, "rip job done");
             update_job(&app, job_id, "done", 1.0, None);
             emit(&app, job_id, Some(track_id), "done", 1.0, None);
         }
@@ -230,6 +241,7 @@ async fn run_rip_job(
 }
 
 fn finish_error(app: &AppHandle, job_id: i64, track_id: Option<i64>, error: &str) {
+    tracing::error!(job_id, track_id, error, "job failed");
     update_job(app, job_id, "error", 0.0, Some(error));
     emit(app, job_id, track_id, "error", 0.0, Some(error.to_string()));
 }

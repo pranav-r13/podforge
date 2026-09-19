@@ -81,6 +81,14 @@ export interface Job {
   completed_at: string | null;
 }
 
+export interface Settings {
+  output_dir: string;
+  default_format: string;
+  default_quality: string;
+  mb_user_agent: string;
+  concurrency: number;
+}
+
 export interface JobProgressEvent {
   job_id: number;
   track_id: number | null;

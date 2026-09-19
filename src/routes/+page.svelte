@@ -13,6 +13,7 @@
     Job,
     JobProgressEvent,
     MbCandidate,
+    Settings,
     TagPatch,
   } from "$lib/types";
 
@@ -76,6 +77,17 @@
   let jobs = $state<Job[]>([]);
   let jobsPanelOpen = $state(true);
   let unlistenJobProgress: (() => void) | null = null;
+
+  let settings = $state<Settings | null>(null);
+  let showSettingsDialog = $state(false);
+  let settingsForm = $state<Settings>({
+    output_dir: "",
+    default_format: "mp3",
+    default_quality: "0",
+    mb_user_agent: "",
+    concurrency: 1,
+  });
+  let settingsSaving = $state(false);
 
   let selectedAlbum = $derived(
     albums.find((a) => a.id === selectedAlbumId) ?? null,
@@ -392,13 +404,58 @@
 
   async function openConvertDialog() {
     if (convertOutputDir === "") {
-      try {
-        convertOutputDir = await join(await audioDir(), "Converted");
-      } catch {
-        convertOutputDir = "";
+      if (settings?.output_dir) {
+        convertOutputDir = settings.output_dir;
+      } else {
+        try {
+          convertOutputDir = await join(await audioDir(), "Converted");
+        } catch {
+          convertOutputDir = "";
+        }
       }
     }
     showConvertDialog = true;
+  }
+
+  async function loadSettings() {
+    try {
+      settings = await invoke<Settings>("get_settings");
+      settingsForm = { ...settings };
+      if (settings.default_format) {
+        setConvertFormat(settings.default_format as ConvertFormat);
+        if (settings.default_quality) convertQuality = settings.default_quality;
+      }
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function openSettingsDialog() {
+    if (settings) settingsForm = { ...settings };
+    showSettingsDialog = true;
+  }
+
+  function closeSettingsDialog() {
+    showSettingsDialog = false;
+  }
+
+  async function chooseSettingsOutputDir() {
+    const path = await open({ directory: true, multiple: false });
+    if (path) settingsForm.output_dir = path;
+  }
+
+  async function saveSettings() {
+    settingsSaving = true;
+    error = null;
+    try {
+      settings = await invoke<Settings>("update_settings", { patch: settingsForm });
+      settingsForm = { ...settings };
+      showSettingsDialog = false;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      settingsSaving = false;
+    }
   }
 
   function closeConvertDialog() {
@@ -441,6 +498,7 @@
 
   onMount(async () => {
     await loadLibrary();
+    await loadSettings();
     try {
       jobs = await invoke<Job[]>("list_jobs", { status: null });
     } catch (e) {
@@ -461,6 +519,13 @@
     <div class="flex items-center justify-between px-4 py-3">
       <h1 class="text-sm font-medium text-neutral-500 dark:text-neutral-400">Albums</h1>
       <div class="flex gap-2">
+        <button
+          onclick={openSettingsDialog}
+          title="Settings"
+          class="rounded-md border border-neutral-300 px-2 py-1.5 text-xs font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900"
+        >
+          ⚙
+        </button>
         <button
           onclick={openCdDialog}
           class="rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900"
@@ -935,6 +1000,111 @@
           class="mt-4 w-full rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
         >
           {converting ? "Starting…" : `Convert ${selectedTrackIds.size} tracks`}
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  {#if showSettingsDialog}
+    <div
+      class="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      role="button"
+      tabindex="-1"
+      onclick={closeSettingsDialog}
+      onkeydown={(e) => e.key === "Escape" && closeSettingsDialog()}
+    >
+      <div
+        role="dialog"
+        tabindex="-1"
+        class="w-[28rem] rounded-lg bg-white p-4 shadow-xl dark:bg-neutral-900"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.stopPropagation()}
+      >
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-sm font-medium">Settings</h3>
+          <button onclick={closeSettingsDialog} class="text-xs text-neutral-400">Close</button>
+        </div>
+
+        <label for="settings-output-dir" class="block text-xs font-medium text-neutral-500 dark:text-neutral-400">
+          Default output folder
+        </label>
+        <div class="mt-1 flex gap-2">
+          <input
+            id="settings-output-dir"
+            type="text"
+            bind:value={settingsForm.output_dir}
+            placeholder="~/Music/Converted"
+            class="w-full rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+          />
+          <button
+            onclick={chooseSettingsOutputDir}
+            class="shrink-0 rounded-md border border-neutral-300 px-2 py-1 text-xs font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-900"
+          >
+            Choose…
+          </button>
+        </div>
+
+        <div class="mt-3 flex gap-3">
+          <div class="flex-1">
+            <label for="settings-format" class="block text-xs font-medium text-neutral-500 dark:text-neutral-400">
+              Default format
+            </label>
+            <select
+              id="settings-format"
+              bind:value={settingsForm.default_format}
+              class="mt-1 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+            >
+              <option value="mp3">MP3</option>
+              <option value="alac">ALAC (.m4a)</option>
+              <option value="flac">FLAC</option>
+              <option value="aac">AAC (.m4a)</option>
+            </select>
+          </div>
+          <div class="flex-1">
+            <label for="settings-quality" class="block text-xs font-medium text-neutral-500 dark:text-neutral-400">
+              Default quality
+            </label>
+            <input
+              id="settings-quality"
+              type="text"
+              bind:value={settingsForm.default_quality}
+              class="mt-1 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+            />
+          </div>
+        </div>
+
+        <label for="settings-concurrency" class="mt-3 block text-xs font-medium text-neutral-500 dark:text-neutral-400">
+          Concurrent jobs — {settingsForm.concurrency} (applies after restart)
+        </label>
+        <input
+          id="settings-concurrency"
+          type="range"
+          min="1"
+          max="8"
+          bind:value={settingsForm.concurrency}
+          class="mt-1 w-full"
+        />
+
+        <label for="settings-mb-agent" class="mt-3 block text-xs font-medium text-neutral-500 dark:text-neutral-400">
+          MusicBrainz User-Agent <span class="text-red-500">*</span>
+        </label>
+        <input
+          id="settings-mb-agent"
+          type="text"
+          bind:value={settingsForm.mb_user_agent}
+          placeholder="YourApp/1.0 ( contact@example.com )"
+          class="mt-1 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+        />
+        <p class="mt-1 text-xs text-neutral-400">
+          Required by MusicBrainz's terms of use. Comes with a default; put your own contact info here if you plan to use MusicBrainz heavily.
+        </p>
+
+        <button
+          onclick={saveSettings}
+          disabled={settingsSaving}
+          class="mt-4 w-full rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+        >
+          {settingsSaving ? "Saving…" : "Save Settings"}
         </button>
       </div>
     </div>

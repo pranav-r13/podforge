@@ -46,6 +46,18 @@ pub struct Job {
     pub completed_at: Option<String>,
 }
 
+/// App-wide settings, persisted as key/value rows in the `settings` table.
+/// Every field has a hardcoded default (see `db::queries` callers in
+/// `commands.rs`) so a fresh install works before the user opens Settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    pub output_dir: String,
+    pub default_format: String,
+    pub default_quality: String,
+    pub mb_user_agent: String,
+    pub concurrency: i64,
+}
+
 /// In-memory result of scanning a folder, before it's inserted into the DB.
 #[derive(Debug, Clone)]
 pub struct ScannedAlbum {

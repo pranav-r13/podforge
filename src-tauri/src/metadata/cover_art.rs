@@ -1,16 +1,14 @@
-const USER_AGENT: &str = "Podforge/0.1.0 ( https://github.com/pranav-r13/podforge )";
-
 /// Fetches the front cover image for a MusicBrainz release from the Cover
 /// Art Archive. Returns `(bytes, mime_type)`. Many releases have no art at
 /// all (404) -- that's an expected, non-fatal outcome the caller should
 /// treat as "no cover available", not an error to surface loudly.
-pub fn fetch_front_cover(release_id: &str) -> Result<(Vec<u8>, String), String> {
+pub fn fetch_front_cover(user_agent: &str, release_id: &str) -> Result<(Vec<u8>, String), String> {
     let url = format!("https://coverartarchive.org/release/{release_id}/front");
 
     let client = reqwest::blocking::Client::new();
     let response = client
         .get(&url)
-        .header("User-Agent", USER_AGENT)
+        .header("User-Agent", user_agent)
         .send()
         .map_err(|e| format!("Cover Art Archive request failed: {e}"))?;
 

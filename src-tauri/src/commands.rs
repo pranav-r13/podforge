@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 
 use crate::convert::ffmpeg::ConvertOptions;
-use crate::convert::job_queue::JobQueue;
-use crate::db::models::{Album, Job, PlannedTrack, Track};
+use crate::convert::job_queue::{self, JobQueue};
+use crate::db::models::{Album, Job, PlannedTrack, Settings, Track};
 use crate::db::{queries, DbState};
 use crate::import::cd_detect::{self, CdInfo};
 use crate::import::disc_id;
@@ -13,6 +13,58 @@ use crate::metadata::cover_art;
 use crate::metadata::ipod_fix::{self, FixReport};
 use crate::metadata::musicbrainz::{self, MbCandidate};
 use crate::metadata::tags::{self, TagPatch};
+
+/// Reads Settings out of the `settings` key/value table, falling back to
+/// hardcoded defaults for any key never written (fresh install, or a key
+/// added in a later version). Never fails -- a missing/corrupt setting just
+/// means "use the default" rather than blocking the whole app.
+pub(crate) fn load_settings(conn: &rusqlite::Connection) -> Settings {
+    let get = |key: &str, default: &str| {
+        queries::get_setting(conn, key)
+            .ok()
+            .flatten()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    let default_concurrency = job_queue::default_concurrency();
+    Settings {
+        output_dir: get("output_dir", ""),
+        default_format: get("default_format", "mp3"),
+        default_quality: get("default_quality", "0"),
+        mb_user_agent: get("mb_user_agent", musicbrainz::DEFAULT_USER_AGENT),
+        concurrency: get("concurrency", &default_concurrency.to_string())
+            .parse()
+            .unwrap_or(default_concurrency as i64),
+    }
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<DbState>) -> Result<Settings, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(load_settings(&conn))
+}
+
+/// Persists every field of `patch`. The frontend always sends the full
+/// Settings object (loaded via `get_settings` first), so there's no partial
+/// update case to reconcile.
+#[tauri::command]
+pub fn update_settings(state: State<DbState>, patch: Settings) -> Result<Settings, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    queries::set_setting(&conn, "output_dir", &patch.output_dir).map_err(|e| e.to_string())?;
+    queries::set_setting(&conn, "default_format", &patch.default_format).map_err(|e| e.to_string())?;
+    queries::set_setting(&conn, "default_quality", &patch.default_quality).map_err(|e| e.to_string())?;
+    queries::set_setting(&conn, "mb_user_agent", &patch.mb_user_agent).map_err(|e| e.to_string())?;
+    queries::set_setting(&conn, "concurrency", &patch.concurrency.max(1).to_string()).map_err(|e| e.to_string())?;
+    Ok(load_settings(&conn))
+}
+
+fn require_mb_user_agent(conn: &rusqlite::Connection) -> Result<String, String> {
+    let settings = load_settings(conn);
+    if settings.mb_user_agent.trim().is_empty() {
+        return Err("Set a MusicBrainz User-Agent in Settings before searching MusicBrainz.".to_string());
+    }
+    Ok(settings.mb_user_agent)
+}
 
 #[tauri::command]
 pub fn scan_folder(state: State<DbState>, path: String) -> Result<Vec<Album>, String> {
@@ -56,8 +108,10 @@ pub fn detect_cd() -> Option<CdInfo> {
 /// (possibly empty) for manual disambiguation, same contract as
 /// `lookup_musicbrainz`.
 #[tauri::command]
-pub fn lookup_cd_release(disc_id: String) -> Result<Vec<MbCandidate>, String> {
-    musicbrainz::lookup_by_discid(&disc_id)
+pub fn lookup_cd_release(state: State<DbState>, disc_id: String) -> Result<Vec<MbCandidate>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let user_agent = require_mb_user_agent(&conn)?;
+    musicbrainz::lookup_by_discid(&user_agent, &disc_id)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -80,7 +134,13 @@ pub fn rip_and_import_cd(
     release_id: Option<String>,
 ) -> Result<CdImportResult, String> {
     let disc = disc_id::read_disc(&device)?;
-    let release_detail = release_id.as_ref().and_then(|id| musicbrainz::fetch_release_detail(id).ok());
+    let user_agent = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        load_settings(&conn).mb_user_agent
+    };
+    let release_detail = release_id
+        .as_ref()
+        .and_then(|id| musicbrainz::fetch_release_detail(&user_agent, id).ok());
 
     let album_title = release_detail
         .as_ref()
@@ -192,9 +252,10 @@ pub fn apply_ipod_compat_fix(state: State<DbState>, album_id: i64) -> Result<Fix
 #[tauri::command]
 pub fn lookup_musicbrainz(state: State<DbState>, album_id: i64) -> Result<Vec<MbCandidate>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let user_agent = require_mb_user_agent(&conn)?;
     let album = queries::get_album(&conn, album_id).map_err(|e| e.to_string())?;
     let artist = album.album_artist.clone().unwrap_or_default();
-    musicbrainz::search_release(&artist, &album.title)
+    musicbrainz::search_release(&user_agent, &artist, &album.title)
 }
 
 /// Records the chosen MusicBrainz release on the album, then best-effort
@@ -202,12 +263,13 @@ pub fn lookup_musicbrainz(state: State<DbState>, album_id: i64) -> Result<Vec<Mb
 /// with no cover art is a normal outcome, not a failure of the match itself.
 #[tauri::command]
 pub fn apply_musicbrainz_match(app: AppHandle, state: State<DbState>, album_id: i64, release_id: String) -> Result<Album, String> {
-    {
+    let user_agent = {
         let conn = state.0.lock().map_err(|e| e.to_string())?;
         queries::set_album_musicbrainz_release(&conn, album_id, &release_id).map_err(|e| e.to_string())?;
-    }
+        load_settings(&conn).mb_user_agent
+    };
 
-    if let Ok((bytes, mime)) = cover_art::fetch_front_cover(&release_id) {
+    if let Ok((bytes, mime)) = cover_art::fetch_front_cover(&user_agent, &release_id) {
         apply_cover_bytes(&app, &state, album_id, bytes, &mime)?;
     }
 

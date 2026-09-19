@@ -274,6 +274,25 @@ pub fn get_album(conn: &Connection, album_id: i64) -> rusqlite::Result<Album> {
     stmt.query_row(params![album_id], |row| row_to_album(conn, row))
 }
 
+pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| row.get(0))
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+}
+
+/// Upserts one setting. `settings` has no default rows, so every key is
+/// either absent (caller falls back to a hardcoded default) or explicitly set.
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
 /// Returns true if an album with this exact source_path is already imported,
 /// so re-scanning a folder doesn't create duplicates.
 pub fn album_exists_for_path(conn: &Connection, source_path: &str) -> rusqlite::Result<bool> {
