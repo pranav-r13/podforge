@@ -27,3 +27,22 @@ export interface Album {
   created_at: string;
   tracks: Track[];
 }
+
+/** Partial tag edit; omitted/undefined fields are left untouched. */
+export interface TagPatch {
+  title?: string;
+  artist?: string;
+  album?: string;
+  album_artist?: string;
+  year?: number;
+  genre?: string;
+  track_number?: number;
+  disc_number?: number;
+}
+
+export interface FixReport {
+  album_id: number;
+  tags_normalized: number;
+  tracks_reencoded: string[];
+  errors: string[];
+}

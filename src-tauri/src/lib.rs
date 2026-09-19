@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod import;
+mod metadata;
 
 use std::sync::Mutex;
 
@@ -24,6 +25,9 @@ pub fn run() {
             commands::scan_folder,
             commands::get_library,
             commands::get_album,
+            commands::update_track_tags,
+            commands::bulk_update_tags,
+            commands::apply_ipod_compat_fix,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

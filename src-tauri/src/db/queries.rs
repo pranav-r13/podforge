@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection};
 
 use super::models::{Album, ScannedAlbum, Track};
+use crate::metadata::tags::TagPatch;
 
 /// Inserts a scanned album and its tracks in a single transaction.
 /// Returns the new album's id.
@@ -67,6 +68,58 @@ pub fn get_tracks_for_album(conn: &Connection, album_id: i64) -> rusqlite::Resul
     )?;
     let rows = stmt.query_map(params![album_id], row_to_track)?;
     rows.collect()
+}
+
+pub fn get_track(conn: &Connection, track_id: i64) -> rusqlite::Result<Track> {
+    conn.query_row(
+        "SELECT * FROM tracks WHERE id = ?1",
+        params![track_id],
+        row_to_track,
+    )
+}
+
+/// Applies the track-level fields of `patch` (title/artist/track#/disc#) to
+/// the DB row. Fields left `None` are untouched via `COALESCE`.
+pub fn update_track_fields(conn: &Connection, track_id: i64, patch: &TagPatch) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tracks SET
+            title = COALESCE(?1, title),
+            artist = COALESCE(?2, artist),
+            track_number = COALESCE(?3, track_number),
+            disc_number = COALESCE(?4, disc_number)
+         WHERE id = ?5",
+        params![
+            patch.title,
+            patch.artist,
+            patch.track_number,
+            patch.disc_number,
+            track_id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Applies the album-level fields of `patch` (album/album_artist/year/genre)
+/// to the album row. Fields left `None` are untouched via `COALESCE`.
+pub fn update_album_fields(conn: &Connection, album_id: i64, patch: &TagPatch) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE albums SET
+            title = COALESCE(?1, title),
+            album_artist = COALESCE(?2, album_artist),
+            year = COALESCE(?3, year),
+            genre = COALESCE(?4, genre)
+         WHERE id = ?5",
+        params![patch.album, patch.album_artist, patch.year, patch.genre, album_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_track_codec(conn: &Connection, track_id: i64, codec: &str, container: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tracks SET codec = ?1, container = ?2 WHERE id = ?3",
+        params![codec, container, track_id],
+    )?;
+    Ok(())
 }
 
 fn row_to_album(conn: &Connection, row: &rusqlite::Row) -> rusqlite::Result<Album> {
