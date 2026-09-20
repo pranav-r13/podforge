@@ -56,7 +56,7 @@ impl JobQueue {
         let semaphore = self.semaphore.clone();
         let running_pids = self.running_pids.clone();
 
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
             run_job(app, job_id, track, album, options, running_pids).await;
         });
@@ -93,7 +93,7 @@ impl JobQueue {
         let semaphore = self.semaphore.clone();
         let running_pids = self.running_pids.clone();
 
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
             run_rip_job(
                 app,
