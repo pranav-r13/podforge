@@ -72,6 +72,7 @@
   let convertFormat = $state<ConvertFormat>("mp3");
   let convertQuality = $state(qualityPresets.mp3[0].value);
   let convertOutputDir = $state("");
+  let convertOutputFolderName = $state("");
   let converting = $state(false);
 
   let jobs = $state<Job[]>([]);
@@ -95,6 +96,10 @@
 
   let activeJobs = $derived(
     jobs.filter((j) => j.status === "queued" || j.status === "running"),
+  );
+
+  let finishedJobs = $derived(
+    jobs.filter((j) => j.status === "done" || j.status === "error" || j.status === "cancelled"),
   );
 
   function trackTitle(trackId: number | null): string {
@@ -403,6 +408,7 @@
   }
 
   async function openConvertDialog() {
+    convertOutputFolderName = "";
     if (convertOutputDir === "") {
       if (settings?.output_dir) {
         convertOutputDir = settings.output_dir;
@@ -477,6 +483,7 @@
         format: convertFormat,
         quality: convertQuality,
         outputDir: convertOutputDir,
+        outputFolderName: convertOutputFolderName.trim() || null,
       });
       jobsPanelOpen = true;
       showConvertDialog = false;
@@ -493,6 +500,19 @@
       await invoke("cancel_job", { jobId });
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  let clearingJobs = $state(false);
+
+  async function clearFinishedJobs() {
+    clearingJobs = true;
+    try {
+      jobs = await invoke<Job[]>("clear_finished_jobs");
+    } catch (e) {
+      error = String(e);
+    } finally {
+      clearingJobs = false;
     }
   }
 
@@ -994,6 +1014,17 @@
           </button>
         </div>
 
+        <label for="convert-folder-name" class="mt-3 block text-xs font-medium text-neutral-500 dark:text-neutral-400">
+          Output folder name <span class="font-normal">(optional)</span>
+        </label>
+        <input
+          id="convert-folder-name"
+          type="text"
+          bind:value={convertOutputFolderName}
+          placeholder="Defaults to {'{Artist}/{Album}'}"
+          class="mt-1 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+        />
+
         <button
           onclick={startConversion}
           disabled={converting || !convertOutputDir}
@@ -1112,13 +1143,25 @@
 
   {#if jobs.length > 0}
     <div class="fixed bottom-0 left-0 right-0 z-10 border-t border-neutral-200 bg-white shadow-[0_-1px_8px_rgba(0,0,0,0.06)] dark:border-neutral-800 dark:bg-neutral-950">
-      <button
-        onclick={() => (jobsPanelOpen = !jobsPanelOpen)}
-        class="flex w-full items-center justify-between px-4 py-2 text-xs font-medium text-neutral-500 dark:text-neutral-400"
-      >
-        <span>Jobs — {activeJobs.length} active, {jobs.length} total</span>
-        <span>{jobsPanelOpen ? "Hide ▾" : "Show ▴"}</span>
-      </button>
+      <div class="flex w-full items-center justify-between px-4 py-2 text-xs font-medium text-neutral-500 dark:text-neutral-400">
+        <button onclick={() => (jobsPanelOpen = !jobsPanelOpen)} class="flex-1 text-left">
+          <span>Jobs — {activeJobs.length} active, {jobs.length} total</span>
+        </button>
+        <div class="flex items-center gap-3">
+          {#if finishedJobs.length > 0}
+            <button
+              onclick={clearFinishedJobs}
+              disabled={clearingJobs}
+              class="text-xs font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-50 dark:hover:text-neutral-100"
+            >
+              Clear
+            </button>
+          {/if}
+          <button onclick={() => (jobsPanelOpen = !jobsPanelOpen)}>
+            {jobsPanelOpen ? "Hide ▾" : "Show ▴"}
+          </button>
+        </div>
+      </div>
 
       {#if jobsPanelOpen}
         <div class="max-h-48 overflow-y-auto px-4 pb-3">

@@ -311,6 +311,7 @@ fn apply_cover_bytes(app: &AppHandle, state: &State<DbState>, album_id: i64, byt
 /// `JobQueue` worker pool once a permit is free; progress is persisted to
 /// `jobs` and pushed to the frontend via `job-progress` events rather than
 /// polled.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn enqueue_conversion(
     app: AppHandle,
@@ -320,6 +321,7 @@ pub fn enqueue_conversion(
     format: String,
     quality: String,
     output_dir: String,
+    output_folder_name: Option<String>,
 ) -> Result<Vec<i64>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut job_ids = Vec::new();
@@ -335,6 +337,7 @@ pub fn enqueue_conversion(
             format: format.clone(),
             quality: quality.clone(),
             output_dir: output_dir.clone(),
+            output_folder_name: output_folder_name.clone(),
         };
         job_queue.spawn_conversion(app.clone(), job_id, track, album, options);
     }
@@ -362,6 +365,16 @@ pub fn cancel_job(state: State<DbState>, job_queue: State<JobQueue>, job_id: i64
     job_queue.cancel(job_id);
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     queries::update_job_progress(&conn, job_id, "cancelled", 0.0, None).map_err(|e| e.to_string())
+}
+
+/// Deletes done/error/cancelled jobs from the `jobs` table so the Jobs
+/// drawer's "Clear" button can empty out finished history. Queued/running
+/// jobs are left untouched -- cancel them first if they need to go too.
+#[tauri::command]
+pub fn clear_finished_jobs(state: State<DbState>) -> Result<Vec<Job>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    queries::clear_finished_jobs(&conn).map_err(|e| e.to_string())?;
+    queries::list_jobs(&conn, None).map_err(|e| e.to_string())
 }
 
 fn cover_dir(app: &AppHandle) -> Result<PathBuf, String> {

@@ -70,6 +70,7 @@ pub fn run() {
             commands::get_job_status,
             commands::list_jobs,
             commands::cancel_job,
+            commands::clear_finished_jobs,
             commands::get_settings,
             commands::update_settings,
         ])

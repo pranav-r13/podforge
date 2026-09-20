@@ -231,6 +231,17 @@ pub fn get_job(conn: &Connection, job_id: i64) -> rusqlite::Result<Job> {
     conn.query_row("SELECT * FROM jobs WHERE id = ?1", params![job_id], row_to_job)
 }
 
+/// Removes every job in a terminal state (done/error/cancelled). Queued and
+/// running jobs are left alone so an in-flight conversion can't vanish from
+/// under the Jobs drawer.
+pub fn clear_finished_jobs(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM jobs WHERE status IN ('done', 'error', 'cancelled')",
+        [],
+    )?;
+    Ok(())
+}
+
 pub fn list_jobs(conn: &Connection, status: Option<&str>) -> rusqlite::Result<Vec<Job>> {
     match status {
         Some(status) => {

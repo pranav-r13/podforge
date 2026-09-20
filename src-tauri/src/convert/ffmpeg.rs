@@ -11,6 +11,10 @@ pub struct ConvertOptions {
     pub format: String, // "mp3" | "alac" | "flac" | "aac"
     pub quality: String, // libmp3lame -q:a value, flac -compression_level, or aac -b:a bitrate (e.g. "256k")
     pub output_dir: String,
+    /// User-chosen name for the album's output subfolder. When set,
+    /// replaces the default `{Artist}/{Album}` nesting with a single
+    /// `{output_dir}/{output_folder_name}/` folder.
+    pub output_folder_name: Option<String>,
 }
 
 /// Container extension for a target format. ALAC and AAC both need `.m4a`,
@@ -39,24 +43,30 @@ fn sanitize_path_component(s: &str) -> String {
         .to_string()
 }
 
-/// Builds `{output_dir}/{Artist}/{Album}/{NN} {Title}.ext`, matching the
-/// layout the plan calls out as the default Convert dialog output path.
+/// Builds `{output_dir}/{Artist}/{Album}/{NN} {Title}.ext` by default, matching
+/// the layout the plan calls out as the default Convert dialog output path.
+/// If `options.output_folder_name` is set (non-blank), that name replaces the
+/// `{Artist}/{Album}` nesting with a single flat subfolder instead.
 pub fn build_output_path(album: &Album, track: &Track, options: &ConvertOptions) -> Result<PathBuf, String> {
     let ext = extension_for_format(&options.format)?;
-    let artist = sanitize_path_component(
-        track.artist.as_deref().or(album.album_artist.as_deref()).unwrap_or("Unknown Artist"),
-    );
-    let album_title = sanitize_path_component(&album.title);
     let track_number = track
         .track_number
         .map(|n| format!("{n:02}"))
         .unwrap_or_else(|| "00".to_string());
     let title = sanitize_path_component(&track.title);
 
-    Ok(Path::new(&options.output_dir)
-        .join(artist)
-        .join(album_title)
-        .join(format!("{track_number} {title}.{ext}")))
+    let album_dir = match options.output_folder_name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => Path::new(&options.output_dir).join(sanitize_path_component(name)),
+        _ => {
+            let artist = sanitize_path_component(
+                track.artist.as_deref().or(album.album_artist.as_deref()).unwrap_or("Unknown Artist"),
+            );
+            let album_title = sanitize_path_component(&album.title);
+            Path::new(&options.output_dir).join(artist).join(album_title)
+        }
+    };
+
+    Ok(album_dir.join(format!("{track_number} {title}.{ext}")))
 }
 
 fn codec_args(options: &ConvertOptions) -> Result<Vec<String>, String> {
@@ -190,6 +200,7 @@ mod tests {
             format: format.into(),
             quality: quality.into(),
             output_dir: "/out".into(),
+            output_folder_name: None,
         }
     }
 
@@ -216,6 +227,33 @@ mod tests {
         let path = build_output_path(&album(), &track(), &options("alac", "")).unwrap();
         assert!(path.starts_with("/out/AC-DC"));
         assert_eq!(path.extension().unwrap(), "m4a");
+    }
+
+    #[test]
+    fn output_path_uses_custom_folder_name_when_set() {
+        let mut opts = options("mp3", "2");
+        opts.output_folder_name = Some("My Mixtape".into());
+        let path = build_output_path(&album(), &track(), &opts).unwrap();
+        assert_eq!(
+            path,
+            std::path::Path::new("/out/My Mixtape/03 Back In Black.mp3")
+        );
+    }
+
+    #[test]
+    fn output_path_sanitizes_custom_folder_name() {
+        let mut opts = options("mp3", "2");
+        opts.output_folder_name = Some("Rock/Pop".into());
+        let path = build_output_path(&album(), &track(), &opts).unwrap();
+        assert!(path.starts_with("/out/Rock-Pop"));
+    }
+
+    #[test]
+    fn output_path_ignores_blank_custom_folder_name() {
+        let mut opts = options("mp3", "2");
+        opts.output_folder_name = Some("   ".into());
+        let path = build_output_path(&album(), &track(), &opts).unwrap();
+        assert!(path.starts_with("/out/AC-DC/Rock-Pop Mix"));
     }
 
     #[test]
