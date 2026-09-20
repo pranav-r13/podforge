@@ -1,3 +1,4 @@
+mod bin_path;
 mod commands;
 mod convert;
 mod db;

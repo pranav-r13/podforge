@@ -51,7 +51,7 @@ fn expected_codecs(extension: &str) -> &'static [&'static str] {
 }
 
 fn probe_codec(path: &Path) -> Result<String, String> {
-    let output = Command::new("ffprobe")
+    let output = Command::new(crate::bin_path::resolve("ffprobe"))
         .args(["-v", "quiet", "-print_format", "json", "-show_streams"])
         .arg(path)
         .output()
@@ -80,7 +80,7 @@ fn re_encode_to_match_extension(path: &Path, extension: &str) -> Result<(), Stri
     tmp_name.push(".ipodfix.tmp");
     let tmp_path = PathBuf::from(tmp_name);
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(crate::bin_path::resolve("ffmpeg"));
     cmd.args(["-y", "-i"]).arg(path);
     match extension {
         "mp3" => {

@@ -90,7 +90,7 @@ where
         std::fs::create_dir_all(parent).map_err(|e| format!("could not create output directory: {e}"))?;
     }
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(crate::bin_path::resolve("ffmpeg"));
     cmd.args(["-y", "-i"])
         .arg(source_path)
         .args(["-map", "0:a", "-map", "0:v?"])
